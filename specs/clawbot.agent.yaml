@@ -1,10 +1,118 @@
 # Agent OS — ClawBot Agent Spec
 # First agent definition. Portable across runtimes.
 # See constitution/v0.4.0.md §4.2 for schema, §4.4 for config resolution.
-
-# TODO: Phase 1 — populate after registry and schema are defined
-# This spec must validate against both schema (shape) and registry (meaning).
+#
+# This spec is PORTABLE. No secrets, no host paths, no backend-specific config.
+# Environment bindings live in clawbot.env.yaml (gitignored).
 
 id: clawbot
 name: ClawBot
 version: 0.1.0
+
+identity:
+  soul: ./identity/SOUL.md
+  user_context: ./identity/USER.md
+
+channels:
+  - type: telegram
+    config: ${TELEGRAM_CONFIG}
+
+models:
+  primary: openai-codex/gpt-5.4
+  fallback:
+    - openai-codex/gpt-5.4-mini
+    - openrouter/auto
+    - ollama/qwen3:8b
+  local:
+    - ollama/qwen3:8b
+    - ollama/qwen3:1.7b
+
+capabilities:
+  # ── Core operational ───────────────────
+  - id: tasks.read
+    policy: allow
+    required: true
+
+  - id: tasks.write
+    policy: allow
+    required: true
+
+  - id: tasks.create
+    policy: allow
+    required: true
+
+  - id: tasks.delete
+    policy: confirm            # stricter than default (irreversible_mutation already defaults confirm)
+    required: false
+
+  # ── Information gathering ──────────────
+  - id: web.search
+    policy: allow
+    required: true
+
+  - id: web.fetch
+    policy: allow
+    required: false
+
+  - id: calendar.read
+    policy: allow
+    required: false
+
+  - id: calendar.list
+    policy: allow
+    required: false
+
+  # ── Communication (gated) ──────────────
+  - id: email.read
+    policy: allow
+    required: false
+
+  - id: email.draft
+    policy: allow
+    required: false
+
+  - id: email.send
+    policy: confirm            # irreversible — always confirm
+    required: false
+
+  # ── Memory ─────────────────────────────
+  - id: memory.remember
+    policy: allow
+    required: true
+
+  - id: memory.recall
+    policy: allow
+    required: true
+
+  - id: memory.forget
+    policy: confirm            # destructive — confirm
+    required: false
+
+memory:
+  backend: default
+  scope: agent
+  config: ${MEMORY_CONFIG}
+
+observability:
+  backend: default
+  config: ${OBSERVABILITY_CONFIG}
+
+governance:
+  spend_limit:
+    daily_usd: 5.00
+    monthly_usd: 100.00
+  approval_gates:
+    - email.send
+    - tasks.delete
+    - memory.forget
+  role: operator_agent
+
+schedule:
+  - cron: "0 7 * * *"
+    task: morning_briefing
+  - cron: "0 22 * * *"
+    task: evening_wrapup
+
+runtime:
+  target: openclaw
+  config: ${RUNTIME_CONFIG}
