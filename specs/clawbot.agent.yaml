@@ -1,0 +1,10 @@
+# Agent OS — ClawBot Agent Spec
+# First agent definition. Portable across runtimes.
+# See constitution/v0.4.0.md §4.2 for schema, §4.4 for config resolution.
+
+# TODO: Phase 1 — populate after registry and schema are defined
+# This spec must validate against both schema (shape) and registry (meaning).
+
+id: clawbot
+name: ClawBot
+version: 0.1.0

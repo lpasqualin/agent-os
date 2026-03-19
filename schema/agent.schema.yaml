@@ -1,0 +1,10 @@
+# Agent OS — Agent Spec Schema
+# See constitution/v0.4.0.md §4.2 for field definitions
+# This schema validates SHAPE. The capability registry validates MEANING.
+
+# TODO: Phase 1 — define as JSON Schema or YAML schema
+# Must validate: field presence, types, enum values, env_ref format
+
+type: object
+required: [id, name, version, capabilities, runtime]
+properties: {}

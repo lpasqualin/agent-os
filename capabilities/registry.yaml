@@ -1,0 +1,9 @@
+# Agent OS — Standard Capability Registry
+# See constitution/v0.4.0.md §4.1.3 for full specification
+# This file is the semantic source of truth for all capabilities.
+# Schema validates shape; this registry validates meaning.
+
+# TODO: Phase 1 — populate from constitution's capability table
+# Format: domain.verb with semantic guarantees
+
+capabilities: []
