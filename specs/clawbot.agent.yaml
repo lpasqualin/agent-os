@@ -85,7 +85,7 @@ capabilities:
     required: true
 
   - id: memory.forget
-    policy: allow            # destructive — confirm
+    policy: allow              # routine memory hygiene; not approval-gated
     required: false
 
 memory:
