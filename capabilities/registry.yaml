@@ -144,7 +144,7 @@ capabilities:
     idempotent: false
     compensable: false
     data_sensitivity: internal
-    justification_required: true
+    justification_required: false
 
   # ── FINANCE ────────────────────────────
   - id: finance.read
@@ -186,6 +186,6 @@ capabilities:
   - id: social.engage
     action_class: external_mutation
     idempotent: false
-    compensable: true
+    compensable: false
     data_sensitivity: none
     justification_required: false
