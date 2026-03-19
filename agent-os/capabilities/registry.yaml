@@ -1,0 +1,201 @@
+# Agent OS — Standard Capability Registry v0.4.0
+# Source of truth for all capability semantics.
+# Schema validates shape; this registry validates meaning.
+#
+# See constitution/v0.4.0.md §4.1 for naming doctrine and semantic contracts.
+#
+# Naming: domain.verb (two segments, dot-separated, singular noun + present verb)
+# One capability = one atomic permission boundary
+# No compound verbs, no runtime-specific names
+#
+# Every capability MUST declare all five semantic guarantees.
+# Governance defaults derive from action_class (see contracts/action-taxonomy.md).
+# Agent specs may override policy STRICTER, never more permissive.
+#
+# Registry decisions (Ax review, v0.4.0):
+#   - calendar.list kept as distinct from calendar.read (list = agenda overview,
+#     read = specific event detail — separate permission boundaries)
+#   - memory.forget does NOT require justification (routine cleanup, not privileged)
+#   - social.engage is NOT compensable (likes/replies not reliably reversible)
+#   - browser.navigate classified as billable_read by intended semantics; if an
+#     adapter's navigation causes server-side mutation, that's an adapter/governance
+#     problem, not a registry reclassification
+#   - compensable: na is the canonical value for non-applicable (not null, not n/a)
+
+capabilities:
+
+  # ── TASKS ──────────────────────────────
+  - id: tasks.read
+    action_class: pure_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: internal
+    justification_required: false
+
+  - id: tasks.write
+    action_class: external_mutation
+    idempotent: false
+    compensable: true
+    data_sensitivity: internal
+    justification_required: false
+
+  - id: tasks.create
+    action_class: external_mutation
+    idempotent: false
+    compensable: true
+    data_sensitivity: internal
+    justification_required: false
+
+  - id: tasks.delete
+    action_class: irreversible_mutation
+    idempotent: true
+    compensable: false
+    data_sensitivity: internal
+    justification_required: true
+
+  # ── CALENDAR ───────────────────────────
+  - id: calendar.read
+    action_class: pure_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: personal
+    justification_required: false
+
+  - id: calendar.list
+    action_class: pure_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: personal
+    justification_required: false
+
+  - id: calendar.write
+    action_class: external_mutation
+    idempotent: false
+    compensable: true
+    data_sensitivity: personal
+    justification_required: false
+
+  # ── EMAIL ──────────────────────────────
+  - id: email.read
+    action_class: sensitive_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: personal
+    justification_required: false
+
+  - id: email.send
+    action_class: irreversible_mutation
+    idempotent: false
+    compensable: false
+    data_sensitivity: personal
+    justification_required: true
+
+  - id: email.draft
+    action_class: internal_mutation
+    idempotent: false
+    compensable: true
+    data_sensitivity: personal
+    justification_required: false
+
+  # ── WEB ────────────────────────────────
+  - id: web.search
+    action_class: billable_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: none
+    justification_required: false
+
+  - id: web.fetch
+    action_class: billable_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: none
+    justification_required: false
+
+  # ── BROWSER ────────────────────────────
+  - id: browser.navigate
+    action_class: billable_read
+    idempotent: false
+    compensable: na
+    data_sensitivity: none
+    justification_required: false
+
+  - id: browser.extract
+    action_class: sensitive_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: varies
+    justification_required: false
+
+  - id: browser.interact
+    action_class: external_mutation
+    idempotent: false
+    compensable: false
+    data_sensitivity: varies
+    justification_required: false
+
+  # ── MEMORY ─────────────────────────────
+  - id: memory.remember
+    action_class: internal_mutation
+    idempotent: false
+    compensable: true          # via memory.forget
+    data_sensitivity: internal
+    justification_required: false
+
+  - id: memory.recall
+    action_class: pure_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: internal
+    justification_required: false
+
+  - id: memory.forget
+    action_class: internal_mutation
+    idempotent: false
+    compensable: false
+    data_sensitivity: internal
+    justification_required: false       # routine cleanup should not require justification
+
+  # ── FINANCE ────────────────────────────
+  - id: finance.read
+    action_class: sensitive_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: financial
+    justification_required: false
+
+  - id: finance.trade
+    action_class: irreversible_mutation
+    idempotent: false
+    compensable: false
+    data_sensitivity: financial
+    justification_required: true
+
+  - id: finance.transfer
+    action_class: irreversible_mutation
+    idempotent: false
+    compensable: false
+    data_sensitivity: financial
+    justification_required: true
+
+  # ── SOCIAL ─────────────────────────────
+  - id: social.read
+    action_class: pure_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: none
+    justification_required: false
+
+  - id: social.post
+    action_class: irreversible_mutation
+    idempotent: false
+    compensable: false
+    data_sensitivity: none
+    justification_required: true
+
+  - id: social.engage
+    action_class: external_mutation
+    idempotent: false
+    compensable: false                  # likes/replies/follows not reliably reversible
+    data_sensitivity: none
+    justification_required: false
