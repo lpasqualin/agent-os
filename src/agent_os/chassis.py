@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from agent_os.contracts.models import (
     AgentSpec,
@@ -24,6 +25,7 @@ from agent_os.contracts.models import (
     ActionClass,
     RuntimeExecutionResult,
     RuntimeStatus,
+    ExecutionJournalRecord,
 )
 from agent_os.contracts.errors import (
     UnsupportedCapabilityError,
@@ -31,6 +33,7 @@ from agent_os.contracts.errors import (
     RuntimeTimeoutError,
     RuntimeContractError,
 )
+from agent_os.journal import ExecutionJournal
 from agent_os.loaders.yaml_loader import load_agent_spec, load_registry
 from agent_os.validators.schema_validator import validate_schema, ValidationResult
 from agent_os.validators.registry_validator import validate_registry
@@ -168,6 +171,7 @@ class Chassis:
         self,
         registry_path: str | Path,
         adapter_factory: Any | None = None,
+        journal_dir: str | Path | None = None,
     ):
         """
         Args:
@@ -178,10 +182,13 @@ class Chassis:
                              MockRuntime. Phase 1 tests omit this (MockRuntime
                              everywhere); Phase 2A+ pass a factory that wires real
                              adapters for specific targets (e.g. "openclaw").
+            journal_dir:     Directory for execution journal records.
+                             Defaults to ``.agent_os/journal/`` relative to CWD.
         """
         self.registry_path = Path(registry_path)
         self.registry: CapabilityRegistry | None = None
         self._adapter_factory = adapter_factory
+        self._journal = ExecutionJournal(journal_dir)
 
         # Adapters (set during boot)
         self.runtime: RuntimeAdapter | None = None
@@ -295,16 +302,52 @@ class Chassis:
         """Execute a task through the full chassis pipeline with governance + tracing.
 
         Lifecycle: created → planning → [awaiting_approval →] executing → succeeded | failed
-        All error paths transition to failed with a structured failure_reason.
+        All paths write an ExecutionJournalRecord at their terminal state.
+        Journal write failures never propagate — chassis state is always coherent.
         """
         if not self.spec or not self.runtime or not self.governance or not self.observability:
             return {"error": "Chassis not booted. Call boot() first."}
 
-        agent_id = self.spec.id
-        run_id = f"run_{uuid.uuid4().hex[:8]}"
+        agent_id   = self.spec.id
+        run_id     = f"run_{uuid.uuid4().hex[:8]}"
+        requested_at: datetime       = datetime.now(timezone.utc)
+        started_at:   Optional[datetime] = None   # set just before runtime.execute()
+        policy_decision: Optional[str]  = None    # set after governance evaluates
 
         run = RunContext(run_id=run_id, agent_id=agent_id)
         self.observability.trace_start(run_id, agent_id, {"task": task})
+
+        # ── Journal helper ────────────────────────────────────
+        def _journal(
+            result_dict: dict,
+            error_type: Optional[str] = None,
+        ) -> dict:
+            """Build and write the journal record, then return result_dict unchanged."""
+            finished_at = datetime.now(timezone.utc)
+            status      = result_dict.get("status", "failed")
+            output      = result_dict.get("output")
+            err_msg     = result_dict.get("error")
+            dur_ms      = result_dict.get("duration_ms")
+
+            record = ExecutionJournalRecord(
+                journal_id      = uuid.uuid4().hex,
+                run_id          = run_id,
+                agent_id        = agent_id,
+                capability      = result_dict.get("capability_used") or action_capability,
+                runtime_target  = self.spec.runtime.target if self.spec else None,
+                requested_at    = requested_at,
+                started_at      = started_at,
+                finished_at     = finished_at,
+                status          = status,
+                lifecycle_trace = run.history,
+                policy_decision = policy_decision,
+                result_summary  = output[:500] if isinstance(output, str) else None,
+                error_type      = error_type,
+                error_message   = err_msg,
+                metadata        = {"duration_ms": dur_ms} if dur_ms is not None else {},
+            )
+            self._journal.write(record)
+            return result_dict
 
         # created → planning
         run.transition("planning", reason="task_received")
@@ -312,8 +355,8 @@ class Chassis:
             "from": "created", "to": "planning", "reason": "task_received",
         })
 
-        # ── Planning: resolve capability (fail early before governance) ──
-        action_capability = None
+        # ── Planning: resolve capability (fail early, before governance) ──
+        action_capability: Optional[str] = None
         for cap_ref in self.spec.capabilities:
             cap_def = self.registry.get(cap_ref.id) if self.registry else None
             if cap_def and cap_def.action_class != ActionClass.PURE_READ:
@@ -322,7 +365,6 @@ class Chassis:
         if not action_capability:
             action_capability = self.spec.capabilities[0].id
 
-        # Validate that the runtime can handle this capability before governance
         try:
             tool_name = self.runtime.resolve_capability(action_capability)
         except (ValueError, UnsupportedCapabilityError) as exc:
@@ -331,19 +373,21 @@ class Chassis:
                 "from": "planning", "to": "failed", "reason": "capability_rejected",
             })
             self.observability.trace_end(run_id, "failed", failure_reason="capability_rejected")
-            return {
-                "run_id": run_id,
-                "status": "rejected",
+            return _journal({
+                "run_id":         run_id,
+                "status":         "rejected",
                 "failure_reason": "capability_rejected",
-                "error": str(exc),
-                "lifecycle": run.history,
-            }
+                "error":          str(exc),
+                "capability_used": action_capability,
+                "lifecycle":      run.history,
+            }, error_type=type(exc).__name__)
 
         # ── Governance evaluation (Tier 1) ──
-        gov_decision = self.governance.evaluate(agent_id, action_capability, {"task": task})
+        gov_decision    = self.governance.evaluate(agent_id, action_capability, {"task": task})
+        policy_decision = gov_decision
         self.observability.trace_event(run_id, "governance_decision", {
             "capability": action_capability,
-            "decision": gov_decision,
+            "decision":   gov_decision,
         })
         self.governance.audit_log(agent_id, run_id, action_capability, gov_decision, {"task": task})
 
@@ -353,12 +397,13 @@ class Chassis:
                 "from": "planning", "to": "failed", "reason": "policy_denied",
             })
             self.observability.trace_end(run_id, "failed", failure_reason="policy_denied")
-            return {
-                "run_id": run_id,
-                "status": "failed",
+            return _journal({
+                "run_id":         run_id,
+                "status":         "failed",
                 "failure_reason": "policy_denied",
-                "lifecycle": run.history,
-            }
+                "capability_used": action_capability,
+                "lifecycle":      run.history,
+            })
 
         if gov_decision == "require_approval":
             run.transition("awaiting_approval", reason="governance_requires_approval")
@@ -372,12 +417,13 @@ class Chassis:
             if approval != "approved":
                 run.transition("canceled", reason=f"approval_{approval}")
                 self.observability.trace_end(run_id, "canceled", failure_reason=f"approval_{approval}")
-                return {
-                    "run_id": run_id,
-                    "status": "canceled",
+                return _journal({
+                    "run_id":         run_id,
+                    "status":         "canceled",
                     "failure_reason": f"approval_{approval}",
-                    "lifecycle": run.history,
-                }
+                    "capability_used": action_capability,
+                    "lifecycle":      run.history,
+                })
 
             run.transition("executing", reason="approval_granted")
         else:
@@ -390,36 +436,46 @@ class Chassis:
         # ── Execute through runtime ──
         self.observability.trace_event(run_id, "tool_call", {
             "capability": action_capability,
-            "tool": tool_name,
-            "task": task,
+            "tool":       tool_name,
+            "task":       task,
         })
 
-        def _fail_executing(failure_reason: str, error: str, status: str = "failed") -> dict:
+        def _fail_executing(
+            failure_reason: str,
+            error: str,
+            status: str = "failed",
+            error_type: Optional[str] = None,
+        ) -> dict:
             run.transition("failed", reason=failure_reason)
             self.observability.trace_event(run_id, "state_transition", {
                 "from": "executing", "to": "failed", "reason": failure_reason,
             })
             self.observability.trace_end(run_id, "failed", failure_reason=failure_reason)
-            return {
-                "run_id": run_id,
-                "status": status,
+            return _journal({
+                "run_id":         run_id,
+                "status":         status,
                 "failure_reason": failure_reason,
-                "error": error,
+                "error":          error,
                 "capability_used": action_capability,
-                "tool_used": tool_name,
-                "lifecycle": run.history,
-            }
+                "tool_used":      tool_name,
+                "lifecycle":      run.history,
+            }, error_type=error_type)
 
+        started_at = datetime.now(timezone.utc)
         try:
             result = self.runtime.execute(agent_id, action_capability, task)
         except UnsupportedCapabilityError as exc:
-            return _fail_executing("capability_rejected", str(exc), status="rejected")
+            return _fail_executing("capability_rejected", str(exc), status="rejected",
+                                   error_type=type(exc).__name__)
         except RuntimeTimeoutError as exc:
-            return _fail_executing("timeout", str(exc), status="timed_out")
+            return _fail_executing("timeout", str(exc), status="timed_out",
+                                   error_type=type(exc).__name__)
         except (RuntimeInvocationError, RuntimeContractError) as exc:
-            return _fail_executing("runtime_error", str(exc))
+            return _fail_executing("runtime_error", str(exc),
+                                   error_type=type(exc).__name__)
         except Exception as exc:
-            return _fail_executing("unexpected_error", str(exc))
+            return _fail_executing("unexpected_error", str(exc),
+                                   error_type=type(exc).__name__)
 
         # ── Validate result shape ──
         if not isinstance(result, RuntimeExecutionResult):
@@ -437,30 +493,29 @@ class Chassis:
             self.observability.trace_end(run_id, "succeeded", metadata={
                 "runtime_run_id": result.run_id,
             })
-            return {
-                "run_id": run_id,
-                "status": "succeeded",
+            return _journal({
+                "run_id":          run_id,
+                "status":          "succeeded",
                 "capability_used": action_capability,
-                "tool_used": tool_name,
-                "output": result.output,
-                "duration_ms": result.duration_ms,
-                "lifecycle": run.history,
-            }
+                "tool_used":       tool_name,
+                "output":          result.output,
+                "duration_ms":     result.duration_ms,
+                "lifecycle":       run.history,
+            })
         else:
-            # FAILED, REJECTED, TIMED_OUT all map to executing→failed lifecycle
             failure_reason = result.status.value
             run.transition("failed", reason=failure_reason)
             self.observability.trace_event(run_id, "state_transition", {
                 "from": "executing", "to": "failed", "reason": failure_reason,
             })
             self.observability.trace_end(run_id, "failed", failure_reason=failure_reason)
-            return {
-                "run_id": run_id,
-                "status": result.status.value,
-                "failure_reason": failure_reason,
-                "error": result.error,
+            return _journal({
+                "run_id":          run_id,
+                "status":          result.status.value,
+                "failure_reason":  failure_reason,
+                "error":           result.error,
                 "capability_used": action_capability,
-                "tool_used": tool_name,
-                "duration_ms": result.duration_ms,
-                "lifecycle": run.history,
-            }
+                "tool_used":       tool_name,
+                "duration_ms":     result.duration_ms,
+                "lifecycle":       run.history,
+            })

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid as _uuid
 from datetime import datetime
 from enum import Enum
 from typing import Optional
@@ -40,6 +41,31 @@ class RuntimeExecutionResult(BaseModel):
     duration_ms:  int
     raw_response: Optional[dict] = None   # debug only — do not surface to users
     metadata:     dict           = Field(default_factory=dict)
+
+
+# ── Execution Journal ─────────────────────────────────────────
+
+class ExecutionJournalRecord(BaseModel):
+    """Durable, append-only record of a single chassis execution.
+
+    Written once per execute_task() invocation at the terminal state.
+    Covers all paths: succeeded, failed, rejected, timed_out, canceled.
+    """
+    journal_id:      str                       # uuid hex — unique per record
+    run_id:          str                       # chassis run id (from RunContext)
+    agent_id:        str
+    capability:      Optional[str]  = None     # None only if chassis not booted
+    runtime_target:  Optional[str]  = None     # spec.runtime.target
+    requested_at:    datetime                  # when execute_task() was called
+    started_at:      Optional[datetime] = None # when runtime.execute() was called; None for pre-execution exits
+    finished_at:     datetime                  # when the terminal state was reached
+    status:          str                       # "succeeded" | "failed" | "rejected" | "timed_out" | "canceled"
+    lifecycle_trace: list[dict]  = Field(default_factory=list)   # RunContext.history
+    policy_decision: Optional[str] = None     # gov_decision string; None if governance never ran
+    result_summary:  Optional[str] = None     # output[:500] on success, None otherwise
+    error_type:      Optional[str] = None     # exception class name for exception paths, None otherwise
+    error_message:   Optional[str] = None     # str(exc) or result.error
+    metadata:        dict          = Field(default_factory=dict)
 
 
 # ── Enums ────────────────────────────────────────────────────
