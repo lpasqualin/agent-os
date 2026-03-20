@@ -181,19 +181,59 @@ class TestCapabilityMappings:
     def test_web_search_maps_to_tavily(self, runtime):
         assert runtime.resolve_capability("web.search") == "tavily"
 
-    def test_memory_recall_maps_to_generic_fallback(self, runtime):
+    def test_memory_recall_maps_to_openclaw_memory(self, runtime):
         result = runtime.resolve_capability("memory.recall")
-        # memory.recall is not a Phase 2A explicit skill; fallback is "openclaw:<id>"
-        assert result == "openclaw:memory.recall"
+        assert result == "openclaw_memory"
 
-    def test_unknown_capability_gets_generic_fallback(self, runtime):
-        result = runtime.resolve_capability("calendar.list")
-        assert result == "openclaw:calendar.list"
+    def test_unknown_capability_raises(self, runtime):
+        with pytest.raises(ValueError, match="calendar.list"):
+            runtime.resolve_capability("calendar.list")
 
-    def test_no_capability_returns_none(self, runtime):
-        # resolve_capability always returns a non-None string
-        for cap in ["tasks.read", "web.search", "memory.recall", "tasks.write"]:
+    def test_unsupported_capability_error_names_supported_set(self, runtime):
+        with pytest.raises(ValueError, match="tasks.read"):
+            runtime.resolve_capability("tasks.write")  # write is not in Phase 2A
+
+    def test_known_capabilities_are_all_mapped(self, runtime):
+        for cap in ["tasks.read", "web.search", "memory.recall"]:
             assert runtime.resolve_capability(cap) is not None
+
+    def test_boot_fails_cleanly_with_out_of_scope_capability(
+        self, sandbox_root, mock_invoke
+    ):
+        """Booting a spec that requests an unsupported capability produces a clean
+        BootReport error — not an unhandled exception."""
+        import yaml, tempfile
+
+        out_of_scope_spec = {
+            "id": "bad-agent",
+            "name": "Bad Agent",
+            "version": "0.0.1",
+            "capabilities": [
+                {"id": "tasks.read", "policy": "allow", "required": True},
+                {"id": "tasks.write", "policy": "allow", "required": True},  # unsupported
+            ],
+            "runtime": {"target": "openclaw"},
+        }
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
+        yaml.dump(out_of_scope_spec, tmp)
+        tmp.close()
+
+        from agent_os.adapters.runtime.mock_runtime import MockRuntime
+
+        def factory(target):
+            if target == "openclaw":
+                return OpenClawRuntime(sandbox_root=sandbox_root, invoke_fn=mock_invoke)
+            return MockRuntime()
+
+        chassis = Chassis(registry_path=_registry_path(), adapter_factory=factory)
+        report = chassis.boot(tmp.name)
+
+        Path(tmp.name).unlink()
+
+        assert not report.success, "Boot should fail for unsupported capability"
+        assert any("tasks.write" in err for err in report.errors), (
+            f"Error should name the unsupported capability: {report.errors}"
+        )
 
 
 # ── 4. Execute — invocation and normalized result ─────────────

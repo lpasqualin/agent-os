@@ -2,24 +2,29 @@
 
 Connects Agent OS to a sandboxed OpenClaw instance via one-shot CLI invocation
 (``openclaw agent --local --json``). No gateway required; no always-on service.
+Runs as the invoking user (leo-paz) — no sudo.
 
 Design decisions:
-- ``invoke_fn`` injection lets tests mock the subprocess boundary entirely.
-- ``resolve_capability`` maps Phase 2A skills explicitly; all other capabilities
-  fall back to ``"openclaw:<id>"`` (non-None) so the chassis never sees an
-  unmapped required capability when booting the full ClawBot prod spec.
-- ``execute()`` is error-proof: all subprocess/JSON failures are caught and
-  stored internally; the chassis lifecycle is never interrupted by a sandbox error.
-- ``health()`` always returns ok — the sandbox is a capability, not a daemon.
+- ``resolve_capability`` has an explicit, narrow map. Unsupported capabilities
+  raise ValueError — there is no silent pass-through. This enforces the
+  capability mapping law: an adapter may only claim capabilities it actually
+  implements.
+- ``invoke_fn`` injection replaces the real subprocess in tests. No I/O,
+  no API keys, no live OpenClaw needed for the test suite.
+- ``execute()`` is error-proof: subprocess/JSON failures are caught and stored
+  internally so the chassis lifecycle is never interrupted by sandbox errors.
+- ``health()`` always returns ok — the sandbox is stateless and on-demand.
 
-Invocation (real, non-mocked):
-    sudo -u clawbot \\
-        OPENCLAW_CONFIG_PATH=~/openclaw-sandbox/config/openclaw.json \\
-        OPENCLAW_STATE_DIR=~/openclaw-sandbox/state \\
-        /home/clawbot/.npm-global/bin/openclaw agent --local --json --message "..."
+Real invocation (no sudo, runs as leo-paz):
+    OPENCLAW_CONFIG_PATH=~/openclaw-sandbox/config/openclaw.json \\
+    OPENCLAW_STATE_DIR=~/openclaw-sandbox/state \\
+    /home/clawbot/.npm-global/bin/openclaw agent --local --json --message "..."
 
-For manual testing, TAVILY_WEB_SEARCH_KEY and TODOIST_API_KEY must be in the
-caller's environment (sourced from /etc/openclaw.env or equivalent).
+Binary access: /home/clawbot/.npm-global/bin/openclaw is world-executable (777)
+and /home/clawbot is traversable (o+x). Leo-paz can call it directly.
+
+For live invocations, TAVILY_WEB_SEARCH_KEY and TODOIST_API_KEY must be
+exported by the caller (sourced from /etc/openclaw.env or equivalent).
 """
 
 from __future__ import annotations
@@ -38,11 +43,13 @@ from agent_os.adapters.interfaces import RuntimeAdapter
 _DEFAULT_SANDBOX_ROOT = Path.home() / "openclaw-sandbox"
 _OPENCLAW_BIN = "/home/clawbot/.npm-global/bin/openclaw"
 
-# Phase 2A explicit mappings: capability ID → OpenClaw skill name.
-# Capabilities not listed fall through to the generic fallback in resolve_capability.
+# Phase 2A explicit capability → OpenClaw skill mappings.
+# This map is the complete scope of this adapter. Anything not listed here
+# is not supported and resolve_capability will raise — no silent fallback.
 _CAPABILITY_MAP: dict[str, str] = {
-    "tasks.read": "todoist",
-    "web.search": "tavily",
+    "tasks.read":    "todoist",        # Todoist skill — read-only task list
+    "web.search":    "tavily",         # Tavily skill — stateless web search
+    "memory.recall": "openclaw_memory", # OpenClaw built-in memory search
 }
 
 
@@ -51,14 +58,19 @@ _CAPABILITY_MAP: dict[str, str] = {
 class OpenClawRuntime(RuntimeAdapter):
     """RuntimeAdapter backed by a sandboxed OpenClaw instance.
 
+    Phase 2A scope: tasks.read, web.search, memory.recall.
+    All other capabilities are explicitly unsupported — resolve_capability
+    raises ValueError for anything outside this set.
+
     Args:
         sandbox_root: Root of the openclaw-sandbox tree. Defaults to
                       ``~/openclaw-sandbox``. Must contain
                       ``config/openclaw.json`` for real invocations.
-        binary:       Path to the openclaw binary.
+        binary:       Absolute path to the openclaw binary. Must be
+                      executable by the invoking user without sudo.
         invoke_fn:    Optional ``callable(message: str) -> dict``. When set,
                       replaces the real subprocess call. Use in tests to mock
-                      the OpenClaw invocation boundary without any I/O.
+                      the invocation boundary with no I/O.
         timeout:      Subprocess timeout in seconds. Default 30.
     """
 
@@ -87,8 +99,8 @@ class OpenClawRuntime(RuntimeAdapter):
         """Invoke OpenClaw and return a normalized result dict.
 
         Uses ``invoke_fn`` if injected (tests). Otherwise runs the real
-        subprocess. All errors are caught and returned as
-        ``{"status": "error", "error": "<reason>"}``.
+        subprocess as the current user — no sudo. All errors are caught and
+        returned as ``{"status": "error", "error": "<reason>"}``.
         """
         if self._invoke_fn is not None:
             try:
@@ -96,7 +108,7 @@ class OpenClawRuntime(RuntimeAdapter):
             except Exception as exc:
                 return {"status": "error", "error": str(exc)}
 
-        # ── Real subprocess path ──────────────────────────────
+        # ── Real subprocess path (runs as leo-paz, no sudo) ───
         config_path = self._config_path()
         if not config_path.exists():
             return {
@@ -105,7 +117,6 @@ class OpenClawRuntime(RuntimeAdapter):
             }
 
         cmd = [
-            "sudo", "-u", "clawbot",
             self.binary,
             "agent",
             "--local",
@@ -180,11 +191,8 @@ class OpenClawRuntime(RuntimeAdapter):
     def execute(self, agent_id: str, task: str) -> str:
         """Invoke sandbox OpenClaw for a one-shot task. Returns run_id.
 
-        Errors from the sandbox are captured and stored internally; this method
-        never raises. The chassis lifecycle must not be interrupted by sandbox
-        failures.
-
-        Use ``get_run_result(agent_id, run_id)`` to inspect the stored result.
+        Sandbox errors are captured and stored; this method never raises.
+        Use ``get_run_result(agent_id, run_id)`` to inspect the result.
         """
         run_id = f"run_{uuid.uuid4().hex[:8]}"
         result = self._invoke(task)
@@ -209,19 +217,26 @@ class OpenClawRuntime(RuntimeAdapter):
     def resolve_capability(self, capability_id: str) -> str | None:
         """Map capability ID to the OpenClaw skill that handles it.
 
-        Phase 2A explicit mappings:
-            tasks.read  → todoist
-            web.search  → tavily
+        Phase 2A supported capabilities:
+            tasks.read    → todoist
+            web.search    → tavily
+            memory.recall → openclaw_memory
 
-        All other capabilities fall back to ``"openclaw:<id>"``. This keeps
-        the chassis happy when booting a spec with a wide capability surface
-        (e.g. the full ClawBot prod spec with 14 capabilities) — none will be
-        reported as unmapped.
+        Any capability not in this explicit set raises ValueError. This adapter
+        has a narrow, declared scope — no silent pass-through.
+
+        Raises:
+            ValueError: if capability_id is not in the Phase 2A support set.
         """
-        return _CAPABILITY_MAP.get(capability_id) or f"openclaw:{capability_id}"
+        if capability_id in _CAPABILITY_MAP:
+            return _CAPABILITY_MAP[capability_id]
+        raise ValueError(
+            f"OpenClawRuntime: capability '{capability_id}' is not supported by this adapter. "
+            f"Supported capabilities: {sorted(_CAPABILITY_MAP)}"
+        )
 
     def health(self) -> dict:
-        """Health check — always ok. Sandbox is stateless; config existence is noted."""
+        """Health check — always ok. Sandbox is stateless; config existence noted."""
         return {
             "status": "ok",
             "runtime": "openclaw",

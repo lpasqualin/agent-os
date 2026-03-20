@@ -262,7 +262,13 @@ class Chassis:
         # ── Step 8: Verify capability mappings ──
         unmapped_required = []
         for cap_ref in spec.capabilities:
-            tool = self.runtime.resolve_capability(cap_ref.id)
+            try:
+                tool = self.runtime.resolve_capability(cap_ref.id)
+            except (ValueError, NotImplementedError) as exc:
+                # Adapter explicitly rejected this capability — record it and
+                # treat as unmapped so the missing-required-mapping law fires.
+                report.errors.append(str(exc))
+                tool = None
             report.capability_mappings[cap_ref.id] = tool
             if tool is None and cap_ref.required:
                 unmapped_required.append(cap_ref.id)
