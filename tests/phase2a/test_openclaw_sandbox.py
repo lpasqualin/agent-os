@@ -18,6 +18,8 @@ from pathlib import Path
 from agent_os.chassis import Chassis
 from agent_os.adapters.runtime.openclaw_runtime import OpenClawRuntime
 from agent_os.adapters.interfaces import RuntimeAdapter
+from agent_os.contracts.models import RuntimeExecutionResult, RuntimeStatus
+from agent_os.contracts.errors import RuntimeInvocationError
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -241,24 +243,25 @@ class TestCapabilityMappings:
 class TestExecute:
     """execute() calls invoke_fn and stores a normalized result."""
 
-    def test_execute_returns_run_id(self, runtime):
+    def test_execute_returns_execution_result(self, runtime):
         runtime.deploy({"id": "clawbot-sandbox"})
         runtime.start("clawbot-sandbox")
-        run_id = runtime.execute("clawbot-sandbox", "fetch my tasks")
-        assert run_id.startswith("run_")
-        assert len(run_id) == 12  # "run_" + 8 hex chars
+        result = runtime.execute("clawbot-sandbox", "tasks.read", "fetch my tasks")
+        assert isinstance(result, RuntimeExecutionResult)
+        assert result.run_id.startswith("run_")
+        assert len(result.run_id) == 12  # "run_" + 8 hex chars
 
     def test_execute_calls_invoke_fn(self, runtime, mock_invoke):
         runtime.deploy({"id": "clawbot-sandbox"})
         runtime.start("clawbot-sandbox")
-        runtime.execute("clawbot-sandbox", "search for python packaging")
+        runtime.execute("clawbot-sandbox", "web.search", "search for python packaging")
         assert "search for python packaging" in mock_invoke.calls
 
     def test_execute_stores_result(self, runtime, mock_invoke):
         runtime.deploy({"id": "clawbot-sandbox"})
         runtime.start("clawbot-sandbox")
-        run_id = runtime.execute("clawbot-sandbox", "list tasks")
-        stored = runtime.get_run_result("clawbot-sandbox", run_id)
+        result = runtime.execute("clawbot-sandbox", "tasks.read", "list tasks")
+        stored = runtime.get_run_result("clawbot-sandbox", result.run_id)
         assert stored is not None
         assert stored["result"]["status"] == "ok"
         assert "sandbox response to: list tasks" in stored["result"]["reply"]
@@ -267,22 +270,22 @@ class TestExecute:
         """tasks.read capability: invoke_fn receives the task message."""
         runtime.deploy({"id": "clawbot-sandbox"})
         runtime.start("clawbot-sandbox")
-        run_id = runtime.execute("clawbot-sandbox", "tasks.read: get all tasks")
-        stored = runtime.get_run_result("clawbot-sandbox", run_id)
+        result = runtime.execute("clawbot-sandbox", "tasks.read", "get all tasks")
+        stored = runtime.get_run_result("clawbot-sandbox", result.run_id)
         assert stored is not None
-        assert stored["task"] == "tasks.read: get all tasks"
+        assert stored["task"] == "get all tasks"
 
     def test_execute_web_search_invokes_adapter(self, runtime, mock_invoke):
         """web.search capability: invoke_fn receives the task message."""
         runtime.deploy({"id": "clawbot-sandbox"})
         runtime.start("clawbot-sandbox")
-        run_id = runtime.execute("clawbot-sandbox", "web.search: agent OS frameworks")
-        stored = runtime.get_run_result("clawbot-sandbox", run_id)
+        result = runtime.execute("clawbot-sandbox", "web.search", "agent OS frameworks")
+        stored = runtime.get_run_result("clawbot-sandbox", result.run_id)
         assert stored is not None
-        assert stored["task"] == "web.search: agent OS frameworks"
+        assert stored["task"] == "agent OS frameworks"
 
-    def test_execute_survives_invoke_error(self, sandbox_root):
-        """Adapter never raises even when invoke_fn raises."""
+    def test_execute_raises_on_invoke_error(self, sandbox_root):
+        """Phase 2B: invoke_fn failure propagates as RuntimeInvocationError."""
         def bad_invoke(msg):
             raise RuntimeError("simulated OpenClaw failure")
 
@@ -290,21 +293,19 @@ class TestExecute:
         rt.deploy({"id": "clawbot-sandbox"})
         rt.start("clawbot-sandbox")
 
-        run_id = rt.execute("clawbot-sandbox", "any task")
-        assert run_id.startswith("run_")  # still returns a run_id
-        stored = rt.get_run_result("clawbot-sandbox", run_id)
-        assert stored["result"]["status"] == "error"
+        with pytest.raises(RuntimeInvocationError, match="invoke_fn raised"):
+            rt.execute("clawbot-sandbox", "tasks.read", "any task")
 
     def test_multiple_runs_are_independent(self, runtime, mock_invoke):
         runtime.deploy({"id": "clawbot-sandbox"})
         runtime.start("clawbot-sandbox")
-        run1 = runtime.execute("clawbot-sandbox", "task one")
-        run2 = runtime.execute("clawbot-sandbox", "task two")
-        assert run1 != run2
-        r1 = runtime.get_run_result("clawbot-sandbox", run1)
-        r2 = runtime.get_run_result("clawbot-sandbox", run2)
-        assert "task one" in r1["result"]["reply"]
-        assert "task two" in r2["result"]["reply"]
+        r1 = runtime.execute("clawbot-sandbox", "tasks.read", "task one")
+        r2 = runtime.execute("clawbot-sandbox", "tasks.read", "task two")
+        assert r1.run_id != r2.run_id
+        s1 = runtime.get_run_result("clawbot-sandbox", r1.run_id)
+        s2 = runtime.get_run_result("clawbot-sandbox", r2.run_id)
+        assert "task one" in s1["result"]["reply"]
+        assert "task two" in s2["result"]["reply"]
 
 
 # ── 5. Lifecycle / journal ────────────────────────────────────

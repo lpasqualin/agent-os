@@ -2,10 +2,44 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+
+# ── Runtime execution contract ────────────────────────────────
+
+class RuntimeStatus(str, Enum):
+    """Closed set of terminal statuses for a runtime execution result.
+
+    These are the only valid outcomes an adapter may report. The chassis
+    maps each to the appropriate lifecycle state transition.
+    """
+    SUCCEEDED = "succeeded"
+    FAILED    = "failed"
+    REJECTED  = "rejected"   # capability or policy rejected before invocation
+    TIMED_OUT = "timed_out"  # invocation exceeded timeout; lifecycle → failed
+
+
+class RuntimeExecutionResult(BaseModel):
+    """Strict result shape returned by RuntimeAdapter.execute().
+
+    Every field is required except raw_response (debug only).
+    The chassis validates this shape before advancing the run lifecycle.
+    """
+    run_id:       str
+    status:       RuntimeStatus
+    capability:   str
+    tool_name:    Optional[str]  = None
+    output:       Optional[str]  = None
+    error:        Optional[str]  = None
+    started_at:   datetime
+    finished_at:  datetime
+    duration_ms:  int
+    raw_response: Optional[dict] = None   # debug only — do not surface to users
+    metadata:     dict           = Field(default_factory=dict)
 
 
 # ── Enums ────────────────────────────────────────────────────

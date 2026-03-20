@@ -7,7 +7,10 @@ Backends (mock, OpenClaw, Mem0, Laminar, etc.) implement them.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_os.contracts.models import RuntimeExecutionResult
 
 
 class RuntimeAdapter(ABC):
@@ -32,13 +35,27 @@ class RuntimeAdapter(ABC):
         ...
 
     @abstractmethod
-    def execute(self, agent_id: str, task: str) -> str:
-        """Run a one-shot task. Returns run_id."""
+    def execute(self, agent_id: str, capability: str, task: str) -> "RuntimeExecutionResult":
+        """Run a one-shot task for a specific capability.
+
+        Returns a fully normalised RuntimeExecutionResult on success.
+
+        Raises:
+            UnsupportedCapabilityError: capability is not in this adapter's scope.
+            RuntimeInvocationError:     runtime call failed (non-zero exit, etc.).
+            RuntimeTimeoutError:        invocation exceeded the configured timeout.
+            RuntimeContractError:       raw output could not be normalised.
+        """
         ...
 
     @abstractmethod
     def resolve_capability(self, capability_id: str) -> str | None:
-        """Map capability to runtime-native tool. Returns None if unmapped."""
+        """Map capability to runtime-native tool name.
+
+        Returns the tool name string if supported.
+        May return None (permissive adapters) or raise ValueError /
+        UnsupportedCapabilityError (strict adapters) for unknown capabilities.
+        """
         ...
 
     @abstractmethod

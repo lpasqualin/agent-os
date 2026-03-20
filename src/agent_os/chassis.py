@@ -22,6 +22,14 @@ from agent_os.contracts.models import (
     CapabilityRegistry,
     Policy,
     ActionClass,
+    RuntimeExecutionResult,
+    RuntimeStatus,
+)
+from agent_os.contracts.errors import (
+    UnsupportedCapabilityError,
+    RuntimeInvocationError,
+    RuntimeTimeoutError,
+    RuntimeContractError,
 )
 from agent_os.loaders.yaml_loader import load_agent_spec, load_registry
 from agent_os.validators.schema_validator import validate_schema, ValidationResult
@@ -286,10 +294,8 @@ class Chassis:
     def execute_task(self, task: str) -> dict:
         """Execute a task through the full chassis pipeline with governance + tracing.
 
-        This proves the chassis contract works end-to-end:
-        - Run lifecycle passes through planning
-        - Governance evaluates before execution
-        - Observability traces the entire run
+        Lifecycle: created → planning → [awaiting_approval →] executing → succeeded | failed
+        All error paths transition to failed with a structured failure_reason.
         """
         if not self.spec or not self.runtime or not self.governance or not self.observability:
             return {"error": "Chassis not booted. Call boot() first."}
@@ -297,31 +303,43 @@ class Chassis:
         agent_id = self.spec.id
         run_id = f"run_{uuid.uuid4().hex[:8]}"
 
-        # Create run context
         run = RunContext(run_id=run_id, agent_id=agent_id)
-
-        # Start trace
         self.observability.trace_start(run_id, agent_id, {"task": task})
 
-        # created -> planning (ALWAYS passes through planning)
+        # created → planning
         run.transition("planning", reason="task_received")
         self.observability.trace_event(run_id, "state_transition", {
             "from": "created", "to": "planning", "reason": "task_received",
         })
 
-        # Planning: determine what capability this task needs
-        # (Mock: use first non-pure_read capability as the action)
+        # ── Planning: resolve capability (fail early before governance) ──
         action_capability = None
         for cap_ref in self.spec.capabilities:
             cap_def = self.registry.get(cap_ref.id) if self.registry else None
             if cap_def and cap_def.action_class != ActionClass.PURE_READ:
                 action_capability = cap_ref.id
                 break
-
         if not action_capability:
             action_capability = self.spec.capabilities[0].id
 
-        # Governance evaluation (Tier 1)
+        # Validate that the runtime can handle this capability before governance
+        try:
+            tool_name = self.runtime.resolve_capability(action_capability)
+        except (ValueError, UnsupportedCapabilityError) as exc:
+            run.transition("failed", reason="capability_rejected")
+            self.observability.trace_event(run_id, "state_transition", {
+                "from": "planning", "to": "failed", "reason": "capability_rejected",
+            })
+            self.observability.trace_end(run_id, "failed", failure_reason="capability_rejected")
+            return {
+                "run_id": run_id,
+                "status": "rejected",
+                "failure_reason": "capability_rejected",
+                "error": str(exc),
+                "lifecycle": run.history,
+            }
+
+        # ── Governance evaluation (Tier 1) ──
         gov_decision = self.governance.evaluate(agent_id, action_capability, {"task": task})
         self.observability.trace_event(run_id, "governance_decision", {
             "capability": action_capability,
@@ -348,7 +366,6 @@ class Chassis:
                 "from": "planning", "to": "awaiting_approval",
             })
 
-            # Tier 2: request approval (mock auto-approves)
             approval = self.governance.request_approval(agent_id, action_capability, {"task": task})
             self.observability.trace_event(run_id, "approval_result", {"result": approval})
 
@@ -364,33 +381,86 @@ class Chassis:
 
             run.transition("executing", reason="approval_granted")
         else:
-            # planning -> executing (allowed)
             run.transition("executing", reason="policy_allowed")
 
         self.observability.trace_event(run_id, "state_transition", {
             "from": run.history[-1]["from"], "to": "executing",
         })
 
-        # Execute through runtime
+        # ── Execute through runtime ──
         self.observability.trace_event(run_id, "tool_call", {
             "capability": action_capability,
-            "tool": self.runtime.resolve_capability(action_capability),
+            "tool": tool_name,
             "task": task,
         })
-        runtime_run_id = self.runtime.execute(agent_id, task)
 
-        # Succeeded
-        run.transition("succeeded", reason="task_complete")
-        self.observability.trace_event(run_id, "state_transition", {
-            "from": "executing", "to": "succeeded",
-        })
-        self.observability.trace_end(run_id, "succeeded", metadata={
-            "runtime_run_id": runtime_run_id,
-        })
+        def _fail_executing(failure_reason: str, error: str, status: str = "failed") -> dict:
+            run.transition("failed", reason=failure_reason)
+            self.observability.trace_event(run_id, "state_transition", {
+                "from": "executing", "to": "failed", "reason": failure_reason,
+            })
+            self.observability.trace_end(run_id, "failed", failure_reason=failure_reason)
+            return {
+                "run_id": run_id,
+                "status": status,
+                "failure_reason": failure_reason,
+                "error": error,
+                "capability_used": action_capability,
+                "tool_used": tool_name,
+                "lifecycle": run.history,
+            }
 
-        return {
-            "run_id": run_id,
-            "status": "succeeded",
-            "capability_used": action_capability,
-            "lifecycle": run.history,
-        }
+        try:
+            result = self.runtime.execute(agent_id, action_capability, task)
+        except UnsupportedCapabilityError as exc:
+            return _fail_executing("capability_rejected", str(exc), status="rejected")
+        except RuntimeTimeoutError as exc:
+            return _fail_executing("timeout", str(exc), status="timed_out")
+        except (RuntimeInvocationError, RuntimeContractError) as exc:
+            return _fail_executing("runtime_error", str(exc))
+        except Exception as exc:
+            return _fail_executing("unexpected_error", str(exc))
+
+        # ── Validate result shape ──
+        if not isinstance(result, RuntimeExecutionResult):
+            return _fail_executing(
+                "contract_violation",
+                f"Runtime returned {type(result).__name__}, expected RuntimeExecutionResult",
+            )
+
+        # ── Map result status to lifecycle ──
+        if result.status == RuntimeStatus.SUCCEEDED:
+            run.transition("succeeded", reason="task_complete")
+            self.observability.trace_event(run_id, "state_transition", {
+                "from": "executing", "to": "succeeded",
+            })
+            self.observability.trace_end(run_id, "succeeded", metadata={
+                "runtime_run_id": result.run_id,
+            })
+            return {
+                "run_id": run_id,
+                "status": "succeeded",
+                "capability_used": action_capability,
+                "tool_used": tool_name,
+                "output": result.output,
+                "duration_ms": result.duration_ms,
+                "lifecycle": run.history,
+            }
+        else:
+            # FAILED, REJECTED, TIMED_OUT all map to executing→failed lifecycle
+            failure_reason = result.status.value
+            run.transition("failed", reason=failure_reason)
+            self.observability.trace_event(run_id, "state_transition", {
+                "from": "executing", "to": "failed", "reason": failure_reason,
+            })
+            self.observability.trace_end(run_id, "failed", failure_reason=failure_reason)
+            return {
+                "run_id": run_id,
+                "status": result.status.value,
+                "failure_reason": failure_reason,
+                "error": result.error,
+                "capability_used": action_capability,
+                "tool_used": tool_name,
+                "duration_ms": result.duration_ms,
+                "lifecycle": run.history,
+            }

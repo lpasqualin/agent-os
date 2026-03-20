@@ -1,30 +1,29 @@
-"""OpenClaw runtime adapter — Phase 2A sandbox implementation.
+"""OpenClaw runtime adapter — Phase 2B hardened implementation.
 
 Connects Agent OS to a sandboxed OpenClaw instance via one-shot CLI invocation
 (``openclaw agent --local --json``). No gateway required; no always-on service.
 Runs as the invoking user (leo-paz) — no sudo.
 
-Design decisions:
-- ``resolve_capability`` has an explicit, narrow map. Unsupported capabilities
-  raise ValueError — there is no silent pass-through. This enforces the
-  capability mapping law: an adapter may only claim capabilities it actually
-  implements.
-- ``invoke_fn`` injection replaces the real subprocess in tests. No I/O,
-  no API keys, no live OpenClaw needed for the test suite.
-- ``execute()`` is error-proof: subprocess/JSON failures are caught and stored
-  internally so the chassis lifecycle is never interrupted by sandbox errors.
-- ``health()`` always returns ok — the sandbox is stateless and on-demand.
+Phase 2B contract:
+- execute() returns RuntimeExecutionResult on success.
+- execute() raises structured errors on failure — no silent swallowing.
+- _invoke() surfaces subprocess/JSON failures as typed exceptions.
+- _normalize() converts raw OpenClaw output to RuntimeExecutionResult or raises
+  RuntimeContractError if the shape is unrecognisable.
 
-Real invocation (no sudo, runs as leo-paz):
-    OPENCLAW_CONFIG_PATH=~/openclaw-sandbox/config/openclaw.json \\
-    OPENCLAW_STATE_DIR=~/openclaw-sandbox/state \\
-    /home/clawbot/.npm-global/bin/openclaw agent --local --json --message "..."
+Supported capabilities (Phase 2A scope, unchanged):
+    tasks.read    → todoist
+    web.search    → tavily
+    memory.recall → openclaw_memory
 
-Binary access: /home/clawbot/.npm-global/bin/openclaw is world-executable (777)
-and /home/clawbot is traversable (o+x). Leo-paz can call it directly.
+Anything outside this set raises UnsupportedCapabilityError.
+
+Binary access:
+    /home/clawbot/.npm-global/bin/openclaw is world-executable (777).
+    /home/clawbot is traversable (o+x). Leo-paz invokes it directly.
 
 For live invocations, TAVILY_WEB_SEARCH_KEY and TODOIST_API_KEY must be
-exported by the caller (sourced from /etc/openclaw.env or equivalent).
+exported in the caller's environment.
 """
 
 from __future__ import annotations
@@ -33,10 +32,18 @@ import json
 import os
 import subprocess
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from agent_os.adapters.interfaces import RuntimeAdapter
+from agent_os.contracts.errors import (
+    UnsupportedCapabilityError,
+    RuntimeInvocationError,
+    RuntimeTimeoutError,
+    RuntimeContractError,
+)
+from agent_os.contracts.models import RuntimeExecutionResult, RuntimeStatus
 
 # ── Constants ─────────────────────────────────────────────────
 
@@ -44,12 +51,11 @@ _DEFAULT_SANDBOX_ROOT = Path.home() / "openclaw-sandbox"
 _OPENCLAW_BIN = "/home/clawbot/.npm-global/bin/openclaw"
 
 # Phase 2A explicit capability → OpenClaw skill mappings.
-# This map is the complete scope of this adapter. Anything not listed here
-# is not supported and resolve_capability will raise — no silent fallback.
+# Anything not listed here is not supported — no generic fallback.
 _CAPABILITY_MAP: dict[str, str] = {
-    "tasks.read":    "todoist",        # Todoist skill — read-only task list
-    "web.search":    "tavily",         # Tavily skill — stateless web search
-    "memory.recall": "openclaw_memory", # OpenClaw built-in memory search
+    "tasks.read":    "todoist",
+    "web.search":    "tavily",
+    "memory.recall": "openclaw_memory",
 }
 
 
@@ -58,9 +64,7 @@ _CAPABILITY_MAP: dict[str, str] = {
 class OpenClawRuntime(RuntimeAdapter):
     """RuntimeAdapter backed by a sandboxed OpenClaw instance.
 
-    Phase 2A scope: tasks.read, web.search, memory.recall.
-    All other capabilities are explicitly unsupported — resolve_capability
-    raises ValueError for anything outside this set.
+    Phase 2A capability scope: tasks.read, web.search, memory.recall.
 
     Args:
         sandbox_root: Root of the openclaw-sandbox tree. Defaults to
@@ -70,7 +74,7 @@ class OpenClawRuntime(RuntimeAdapter):
                       executable by the invoking user without sudo.
         invoke_fn:    Optional ``callable(message: str) -> dict``. When set,
                       replaces the real subprocess call. Use in tests to mock
-                      the invocation boundary with no I/O.
+                      the invocation boundary without any I/O.
         timeout:      Subprocess timeout in seconds. Default 30.
     """
 
@@ -96,25 +100,30 @@ class OpenClawRuntime(RuntimeAdapter):
         return self.sandbox_root / "state"
 
     def _invoke(self, message: str) -> dict:
-        """Invoke OpenClaw and return a normalized result dict.
+        """Call OpenClaw and return the raw response dict.
 
         Uses ``invoke_fn`` if injected (tests). Otherwise runs the real
-        subprocess as the current user — no sudo. All errors are caught and
-        returned as ``{"status": "error", "error": "<reason>"}``.
+        subprocess as the current user — no sudo.
+
+        Raises:
+            RuntimeInvocationError: subprocess failed or invoke_fn raised.
+            RuntimeTimeoutError:    subprocess exceeded self._timeout.
+            RuntimeContractError:   stdout was not valid JSON.
         """
         if self._invoke_fn is not None:
             try:
                 return self._invoke_fn(message)
             except Exception as exc:
-                return {"status": "error", "error": str(exc)}
+                raise RuntimeInvocationError(
+                    f"invoke_fn raised: {exc}"
+                ) from exc
 
-        # ── Real subprocess path (runs as leo-paz, no sudo) ───
+        # ── Real subprocess (runs as leo-paz, no sudo) ────────
         config_path = self._config_path()
         if not config_path.exists():
-            return {
-                "status": "error",
-                "error": f"Sandbox config not found: {config_path}",
-            }
+            raise RuntimeInvocationError(
+                f"Sandbox config not found: {config_path}"
+            )
 
         cmd = [
             self.binary,
@@ -126,7 +135,7 @@ class OpenClawRuntime(RuntimeAdapter):
         env = {
             **os.environ,
             "OPENCLAW_CONFIG_PATH": str(config_path),
-            "OPENCLAW_STATE_DIR": str(self._state_dir()),
+            "OPENCLAW_STATE_DIR":   str(self._state_dir()),
         }
 
         try:
@@ -137,19 +146,79 @@ class OpenClawRuntime(RuntimeAdapter):
                 timeout=self._timeout,
                 env=env,
             )
-            if proc.returncode != 0:
-                return {
-                    "status": "error",
-                    "error": proc.stderr.strip() or "non-zero exit",
-                    "exit_code": proc.returncode,
-                }
-            return json.loads(proc.stdout)
-        except subprocess.TimeoutExpired:
-            return {"status": "error", "error": "timeout", "timeout_seconds": self._timeout}
-        except json.JSONDecodeError as exc:
-            return {"status": "error", "error": f"json_decode: {exc}"}
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeTimeoutError(
+                f"OpenClaw timed out after {self._timeout}s"
+            ) from exc
         except Exception as exc:
-            return {"status": "error", "error": str(exc)}
+            raise RuntimeInvocationError(f"Subprocess failed: {exc}") from exc
+
+        if proc.returncode != 0:
+            raise RuntimeInvocationError(
+                f"OpenClaw exit {proc.returncode}: "
+                f"{proc.stderr.strip() or '(no stderr)'}"
+            )
+
+        try:
+            return json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeContractError(
+                f"OpenClaw returned non-JSON output: {exc}"
+            ) from exc
+
+    def _normalize(
+        self,
+        raw: dict,
+        run_id: str,
+        capability: str,
+        tool_name: str,
+        agent_id: str,
+        started_at: datetime,
+        finished_at: datetime,
+        duration_ms: int,
+    ) -> RuntimeExecutionResult:
+        """Normalize raw OpenClaw output to RuntimeExecutionResult.
+
+        Raises:
+            RuntimeContractError: if raw is not a dict.
+        """
+        if not isinstance(raw, dict):
+            raise RuntimeContractError(
+                f"Expected dict from OpenClaw, got {type(raw).__name__}"
+            )
+
+        raw_status = raw.get("status", "ok")
+
+        if raw_status == "error":
+            return RuntimeExecutionResult(
+                run_id=run_id,
+                status=RuntimeStatus.FAILED,
+                capability=capability,
+                tool_name=tool_name,
+                output=None,
+                error=raw.get("error") or str(raw),
+                started_at=started_at,
+                finished_at=finished_at,
+                duration_ms=duration_ms,
+                raw_response=raw,
+                metadata={"agent_id": agent_id},
+            )
+
+        # Extract output from known response keys
+        output = raw.get("reply") or raw.get("output") or raw.get("content")
+        return RuntimeExecutionResult(
+            run_id=run_id,
+            status=RuntimeStatus.SUCCEEDED,
+            capability=capability,
+            tool_name=tool_name,
+            output=str(output) if output is not None else None,
+            error=None,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            raw_response=raw,
+            metadata={"agent_id": agent_id},
+        )
 
     # ── RuntimeAdapter contract ───────────────────────────────
 
@@ -171,7 +240,6 @@ class OpenClawRuntime(RuntimeAdapter):
         return False
 
     def stop(self, agent_id: str) -> bool:
-        """Mark agent stopped."""
         if agent_id in self._agents:
             self._agents[agent_id]["state"] = "stopped"
             return True
@@ -182,32 +250,61 @@ class OpenClawRuntime(RuntimeAdapter):
             return {"status": "not_found"}
         return {
             "agent_id": agent_id,
-            "state": self._agents[agent_id]["state"],
-            "runtime": "openclaw",
-            "mode": "sandbox",
+            "state":    self._agents[agent_id]["state"],
+            "runtime":  "openclaw",
+            "mode":     "sandbox",
             "sandbox_root": str(self.sandbox_root),
         }
 
-    def execute(self, agent_id: str, task: str) -> str:
-        """Invoke sandbox OpenClaw for a one-shot task. Returns run_id.
+    def execute(
+        self, agent_id: str, capability: str, task: str
+    ) -> RuntimeExecutionResult:
+        """Invoke sandbox OpenClaw for a one-shot task.
 
-        Sandbox errors are captured and stored; this method never raises.
-        Use ``get_run_result(agent_id, run_id)`` to inspect the result.
+        Raises:
+            UnsupportedCapabilityError: capability not in Phase 2A scope.
+            RuntimeInvocationError:     subprocess/invoke_fn failed.
+            RuntimeTimeoutError:        invocation timed out.
+            RuntimeContractError:       raw output not normalisable.
         """
+        # 1. Validate capability (strict — no fallback)
+        try:
+            tool_name = self.resolve_capability(capability)
+        except ValueError as exc:
+            raise UnsupportedCapabilityError(str(exc)) from exc
+
+        started_at = datetime.now(timezone.utc)
         run_id = f"run_{uuid.uuid4().hex[:8]}"
-        result = self._invoke(task)
+
+        # 2. Invoke (raises on timeout/invocation/JSON error)
+        raw = self._invoke(task)
+
+        finished_at = datetime.now(timezone.utc)
+        duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
+
+        # 3. Normalize (raises RuntimeContractError if raw is malformed)
+        result = self._normalize(
+            raw, run_id, capability, tool_name, agent_id,
+            started_at, finished_at, duration_ms,
+        )
+
+        # 4. Store for introspection
         if agent_id in self._agents:
             self._agents[agent_id]["runs"][run_id] = {
-                "task": task,
-                "result": result,
+                "task":             task,
+                "result":           raw,        # raw dict (preserved for compat)
+                "execution_result": result,     # Phase 2B: typed result
             }
-        return run_id
+
+        return result
 
     def get_run_result(self, agent_id: str, run_id: str) -> dict | None:
-        """Return the stored invocation result for a run.
+        """Return the stored run entry for introspection in tests.
 
-        Not part of the RuntimeAdapter interface contract. Used by Phase 2A
-        tests to assert on what OpenClaw actually returned.
+        Entry keys:
+            task             – original task string
+            result           – raw dict from invoke_fn / subprocess
+            execution_result – RuntimeExecutionResult (Phase 2B)
         """
         agent = self._agents.get(agent_id)
         if agent is None:
@@ -215,33 +312,29 @@ class OpenClawRuntime(RuntimeAdapter):
         return agent["runs"].get(run_id)
 
     def resolve_capability(self, capability_id: str) -> str | None:
-        """Map capability ID to the OpenClaw skill that handles it.
+        """Map capability ID to OpenClaw skill name.
 
         Phase 2A supported capabilities:
             tasks.read    → todoist
             web.search    → tavily
             memory.recall → openclaw_memory
 
-        Any capability not in this explicit set raises ValueError. This adapter
-        has a narrow, declared scope — no silent pass-through.
-
         Raises:
-            ValueError: if capability_id is not in the Phase 2A support set.
+            ValueError: for any capability outside this set.
         """
         if capability_id in _CAPABILITY_MAP:
             return _CAPABILITY_MAP[capability_id]
         raise ValueError(
-            f"OpenClawRuntime: capability '{capability_id}' is not supported by this adapter. "
-            f"Supported capabilities: {sorted(_CAPABILITY_MAP)}"
+            f"OpenClawRuntime: capability '{capability_id}' is not supported. "
+            f"Supported: {sorted(_CAPABILITY_MAP)}"
         )
 
     def health(self) -> dict:
-        """Health check — always ok. Sandbox is stateless; config existence noted."""
         return {
-            "status": "ok",
-            "runtime": "openclaw",
-            "mode": "sandbox",
-            "sandbox_root": str(self.sandbox_root),
+            "status":        "ok",
+            "runtime":       "openclaw",
+            "mode":          "sandbox",
+            "sandbox_root":  str(self.sandbox_root),
             "config_exists": self._config_path().exists(),
-            "binary": self.binary,
+            "binary":        self.binary,
         }
