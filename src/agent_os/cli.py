@@ -95,6 +95,77 @@ def cmd_boot(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    """Run a capability through the sandbox chassis and print a structured result."""
+    project_root = find_project_root()
+
+    spec_path = Path(args.spec)
+    if not spec_path.is_absolute():
+        spec_path = project_root / spec_path
+
+    registry_path = (
+        Path(args.registry) if getattr(args, "registry", None)
+        else project_root / "capabilities" / "registry.yaml"
+    )
+    if not registry_path.is_absolute():
+        registry_path = project_root / registry_path
+
+    capability = args.capability
+    journal_dir = project_root / ".agent_os" / "journal"
+
+    print(f"Agent OS — run")
+    print(f"Spec:       {spec_path.name}")
+    print(f"Capability: {capability}")
+    print()
+
+    chassis = Chassis(
+        registry_path=registry_path,
+        adapter_factory=_default_adapter_factory,
+        journal_dir=journal_dir,
+    )
+    report = chassis.boot(spec_path)
+
+    if not report.success:
+        print("BOOT FAILED:")
+        for err in report.errors:
+            print(f"  {err}")
+        return 1
+
+    result = chassis.execute_task(capability)
+
+    run_id = result.get("run_id", "N/A")
+    status = result.get("status", "N/A")
+    cap_used = result.get("capability_used", capability)
+    output = result.get("output") or ""
+    error = result.get("error") or ""
+    lifecycle = result.get("lifecycle", [])
+
+    print(f"Run ID:     {run_id}")
+    print(f"Status:     {status}")
+    print(f"Capability: {cap_used}")
+
+    if output:
+        summary = (output[:120] + "...") if len(output) > 120 else output
+        print(f"Result:     {summary}")
+    if error:
+        print(f"Error:      {error[:120]}")
+
+    if lifecycle:
+        print()
+        print("Lifecycle:")
+        for step in lifecycle:
+            reason = f" ({step['reason']})" if step.get("reason") else ""
+            print(f"  {step['from']} -> {step['to']}{reason}")
+
+    journal = ExecutionJournal(journal_dir)
+    latest = journal.read_latest()
+    if latest and latest.run_id == run_id:
+        print()
+        print(f"Journal:    {run_id}.json written")
+
+    return 0
+
+
 def cmd_journal_latest(args: argparse.Namespace) -> int:
     """Print the most recent journal entry."""
     project_root = find_project_root()
@@ -179,6 +250,12 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command")
 
+    # run command
+    run_parser = subparsers.add_parser("run", help="Run a capability through the sandbox chassis")
+    run_parser.add_argument("spec", help="Path to agent spec YAML")
+    run_parser.add_argument("capability", help="Capability ID to execute (e.g. web.search)")
+    run_parser.add_argument("--registry", help="Path to capability registry YAML")
+
     # boot command
     boot_parser = subparsers.add_parser("boot", help="Boot an agent through the chassis")
     boot_parser.add_argument("spec", help="Path to agent spec YAML")
@@ -195,7 +272,9 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "boot":
+    if args.command == "run":
+        sys.exit(cmd_run(args))
+    elif args.command == "boot":
         sys.exit(cmd_boot(args))
     elif args.command == "journal":
         if getattr(args, "journal_command", None) == "latest":

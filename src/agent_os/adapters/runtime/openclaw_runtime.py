@@ -125,11 +125,14 @@ class OpenClawRuntime(RuntimeAdapter):
                 f"Sandbox config not found: {config_path}"
             )
 
+        session_id = f"agtos-{uuid.uuid4().hex[:12]}"
         cmd = [
             self.binary,
             "agent",
             "--local",
             "--json",
+            "--agent", "main",
+            "--session-id", session_id,
             "--message", message,
         ]
         env = {
