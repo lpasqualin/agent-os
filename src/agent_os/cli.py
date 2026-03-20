@@ -194,6 +194,8 @@ def cmd_journal_latest(args: argparse.Namespace) -> int:
 # Normalization is applied at read time only — journal files are never mutated.
 # Canonical display values: SUCCESS | FAILED | CAPABILITY_ERROR | TIMEOUT
 
+_FAILURE_STATUSES: frozenset[str] = frozenset({"FAILED", "CAPABILITY_ERROR", "TIMEOUT"})
+
 _STATUS_MAP: dict[str, str] = {
     "succeeded":       "SUCCESS",
     "success":         "SUCCESS",
@@ -299,7 +301,6 @@ def _cmd_runs_summary(journal: ExecutionJournal) -> int:
     )
 
     # Last failure (FAILED, CAPABILITY_ERROR, or TIMEOUT)
-    _FAILURE_STATUSES = {"FAILED", "CAPABILITY_ERROR", "TIMEOUT"}
     last_failure = next(
         (r for r in all_rows if _normalize_status(r.get("status", "")) in _FAILURE_STATUSES),
         None,
@@ -315,6 +316,42 @@ def _cmd_runs_summary(journal: ExecutionJournal) -> int:
         )
 
     return 0
+
+
+def _resolve_run_shortcut(
+    journal_dir: Path,
+    latest: bool = False,
+    last_failure: bool = False,
+) -> tuple[str | None, str | None]:
+    """Resolve --latest or --last-failure to a concrete run_id.
+
+    Returns (run_id, None) on successful resolution.
+    Returns (None, error_message) if the journal is empty or no match.
+    Returns (None, None) if no shortcut is requested (caller handles positional).
+
+    This is a pure lookup — no business logic, no journal mutation.
+    """
+    if not latest and not last_failure:
+        return None, None
+
+    try:
+        rows = ExecutionJournal(journal_dir).list_runs(limit=10000)
+    except Exception:
+        rows = []
+
+    if latest:
+        if not rows:
+            return None, "No runs found."
+        return rows[0]["run_id"], None
+
+    # last_failure
+    match = next(
+        (r for r in rows if _normalize_status(r.get("status", "")) in _FAILURE_STATUSES),
+        None,
+    )
+    if match is None:
+        return None, "No failed runs found."
+    return match["run_id"], None
 
 
 def cmd_runs(args: argparse.Namespace) -> int:
@@ -450,10 +487,25 @@ def _replay_run(
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
-    """Replay a prior run by run_id — creates a new run through the chassis."""
+    """Replay a prior run — creates a new run through the chassis.
+
+    Accepts a positional run_id OR --last-failure to replay the most
+    recent failed run.
+    """
     project_root = find_project_root()
     journal_dir = project_root / ".agent_os" / "journal"
-    run_id = args.run_id
+
+    use_last_failure = getattr(args, "last_failure", False)
+    if use_last_failure:
+        run_id, err = _resolve_run_shortcut(journal_dir, last_failure=True)
+        if err:
+            print(err)
+            return 0
+    else:
+        run_id = getattr(args, "run_id", None)
+        if not run_id:
+            print("Provide a run_id or --last-failure.")
+            return 1
 
     result, exit_code = _replay_run(
         run_id=run_id,
@@ -506,10 +558,32 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
-    """Print the full journal record for a specific run_id as pretty-printed JSON."""
+    """Print the full journal record for a specific run_id as pretty-printed JSON.
+
+    Accepts a positional run_id OR one of:
+      --latest        resolve to the most recent run
+      --last-failure  resolve to the most recent failed run
+    """
     project_root = find_project_root()
     journal_dir = project_root / ".agent_os" / "journal"
-    run_id = args.run_id
+
+    use_latest = getattr(args, "latest", False)
+    use_last_failure = getattr(args, "last_failure", False)
+
+    if use_latest or use_last_failure:
+        run_id, err = _resolve_run_shortcut(
+            journal_dir, latest=use_latest, last_failure=use_last_failure
+        )
+        if err:
+            print(err)
+            return 0
+    else:
+        run_id = getattr(args, "run_id", None)
+        if not run_id:
+            print("Provide a run_id, --latest, or --last-failure.")
+            return 1
+
+    # ── Existing inspect path (unchanged) ────────────────────
     record_path = journal_dir / f"{run_id}.json"
 
     if not record_path.exists():
@@ -520,7 +594,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         data = json.loads(record_path.read_text())
         print(json.dumps(data, indent=2))
         return 0
-    except Exception as exc:
+    except Exception:
         print(f"Run {run_id} not found.")
         return 1
 
@@ -557,11 +631,19 @@ def main():
 
     # inspect command
     inspect_parser = subparsers.add_parser("inspect", help="Show full journal record for a run_id")
-    inspect_parser.add_argument("run_id", help="Run ID to inspect")
+    inspect_parser.add_argument("run_id", nargs="?", help="Run ID to inspect")
+    inspect_parser.add_argument("--latest", action="store_true", default=False,
+                                help="Inspect the most recent run")
+    inspect_parser.add_argument("--last-failure", action="store_true", default=False,
+                                dest="last_failure",
+                                help="Inspect the most recent failed run")
 
     # replay command
     replay_parser = subparsers.add_parser("replay", help="Replay a prior run by run_id")
-    replay_parser.add_argument("run_id", help="Run ID to replay")
+    replay_parser.add_argument("run_id", nargs="?", help="Run ID to replay")
+    replay_parser.add_argument("--last-failure", action="store_true", default=False,
+                               dest="last_failure",
+                               help="Replay the most recent failed run")
 
     args = parser.parse_args()
 
