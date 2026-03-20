@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -167,51 +168,16 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_journal_latest(args: argparse.Namespace) -> int:
-    """Print the most recent journal entry."""
+    """Print the most recent journal entry as pretty-printed JSON."""
     project_root = find_project_root()
     journal = ExecutionJournal(project_root / ".agent_os" / "journal")
     record = journal.read_latest()
 
     if record is None:
-        print("No journal entries found.")
+        print("Journal is empty.")
         return 0
 
-    print()
-    print("=" * 60)
-    print("  Latest Execution Journal Entry")
-    print("=" * 60)
-    print(f"  Run ID:          {record.run_id}")
-    print(f"  Journal ID:      {record.journal_id}")
-    print(f"  Agent:           {record.agent_id}")
-    print(f"  Capability:      {record.capability or 'N/A'}")
-    print(f"  Runtime target:  {record.runtime_target or 'N/A'}")
-    print(f"  Status:          {record.status}")
-    print(f"  Policy decision: {record.policy_decision or 'N/A'}")
-    print(f"  Requested at:    {record.requested_at}")
-    if record.started_at:
-        print(f"  Started at:      {record.started_at}")
-    print(f"  Finished at:     {record.finished_at}")
-    if record.metadata.get("duration_ms") is not None:
-        print(f"  Duration:        {record.metadata['duration_ms']} ms")
-    if record.result_summary:
-        summary = record.result_summary
-        if len(summary) > 120:
-            summary = summary[:117] + "..."
-        print(f"  Output summary:  {summary}")
-    if record.error_type:
-        print(f"  Error type:      {record.error_type}")
-    if record.error_message:
-        msg = record.error_message
-        if len(msg) > 120:
-            msg = msg[:117] + "..."
-        print(f"  Error message:   {msg}")
-    if record.lifecycle_trace:
-        print()
-        print("  Lifecycle:")
-        for step in record.lifecycle_trace:
-            reason = f" ({step['reason']})" if step.get("reason") else ""
-            print(f"    {step['from']} -> {step['to']}{reason}")
-    print()
+    print(json.dumps(json.loads(record.model_dump_json()), indent=2))
     return 0
 
 
@@ -219,28 +185,47 @@ def cmd_runs(args: argparse.Namespace) -> int:
     """List recent execution runs."""
     project_root = find_project_root()
     journal = ExecutionJournal(project_root / ".agent_os" / "journal")
-    limit = getattr(args, "limit", 20)
+    limit = getattr(args, "limit", 10)
     rows = journal.list_runs(limit=limit)
 
     if not rows:
-        print("No runs recorded yet.")
+        print("No runs found.")
         return 0
 
-    header = f"{'RUN_ID':<16}  {'STATUS':<12}  {'AGENT':<20}  {'CAPABILITY':<20}  REQUESTED_AT"
+    header = f"{'RUN_ID':<20}  {'CAPABILITY':<16}  {'STATUS':<14}  STARTED_AT"
     print()
     print(header)
     print("-" * len(header))
     for r in rows:
-        requested = str(r["requested_at"])[:19].replace("T", " ")
+        started = str(r.get("requested_at", ""))[:19].replace("T", " ")
         print(
-            f"{str(r['run_id']):<16}  "
-            f"{str(r['status']):<12}  "
-            f"{str(r['agent_id']):<20}  "
-            f"{str(r['capability'] or ''):<20}  "
-            f"{requested}"
+            f"{str(r['run_id']):<20}  "
+            f"{str(r['capability'] or ''):<16}  "
+            f"{str(r['status']):<14}  "
+            f"{started}"
         )
     print()
     return 0
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    """Print the full journal record for a specific run_id as pretty-printed JSON."""
+    project_root = find_project_root()
+    journal_dir = project_root / ".agent_os" / "journal"
+    run_id = args.run_id
+    record_path = journal_dir / f"{run_id}.json"
+
+    if not record_path.exists():
+        print(f"Run {run_id} not found.")
+        return 1
+
+    try:
+        data = json.loads(record_path.read_text())
+        print(json.dumps(data, indent=2))
+        return 0
+    except Exception as exc:
+        print(f"Run {run_id} not found.")
+        return 1
 
 
 def main():
@@ -268,7 +253,11 @@ def main():
 
     # runs command
     runs_parser = subparsers.add_parser("runs", help="List recent execution runs")
-    runs_parser.add_argument("--limit", type=int, default=20, help="Max runs to show (default 20)")
+    runs_parser.add_argument("--limit", type=int, default=10, help="Max runs to show (default 10)")
+
+    # inspect command
+    inspect_parser = subparsers.add_parser("inspect", help="Show full journal record for a run_id")
+    inspect_parser.add_argument("run_id", help="Run ID to inspect")
 
     args = parser.parse_args()
 
@@ -284,6 +273,8 @@ def main():
             sys.exit(1)
     elif args.command == "runs":
         sys.exit(cmd_runs(args))
+    elif args.command == "inspect":
+        sys.exit(cmd_inspect(args))
     else:
         parser.print_help()
         sys.exit(1)
