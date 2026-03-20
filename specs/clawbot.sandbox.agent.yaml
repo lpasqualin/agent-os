@@ -1,0 +1,44 @@
+# Agent OS — ClawBot Sandbox Spec (Phase 2A)
+# Trimmed agent for sandboxed OpenClaw runtime testing.
+# No Telegram, no destructive actions, intentionally narrow surface area.
+#
+# Runtime: openclaw (sandbox mode — ~/openclaw-sandbox, no gateway, --local invocation)
+# Memory / Observability / Governance: mock (Phase 2A scope)
+#
+# DO NOT promote to production. This spec exists to validate the runtime adapter only.
+
+id: clawbot-sandbox
+name: ClawBot Sandbox
+version: 0.1.0
+
+capabilities:
+  # tasks.read: pure_read — read Todoist tasks, no mutation
+  - id: tasks.read
+    policy: allow
+    required: true
+
+  # web.search: billable_read — Tavily search, read-only, stateless
+  - id: web.search
+    policy: allow
+    required: true
+
+  # memory.recall: pure_read — delegated to mock adapter in Phase 2A
+  - id: memory.recall
+    policy: allow
+    required: true
+
+memory:
+  backend: default
+  scope: agent
+
+observability:
+  backend: default
+
+governance:
+  spend_limit:
+    daily_usd: 1.00
+    monthly_usd: 10.00
+  role: sandbox_agent
+
+runtime:
+  target: openclaw

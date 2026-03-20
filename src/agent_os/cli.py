@@ -10,6 +10,15 @@ import sys
 from pathlib import Path
 
 from agent_os.chassis import Chassis
+from agent_os.adapters.runtime.mock_runtime import MockRuntime
+from agent_os.adapters.runtime.openclaw_runtime import OpenClawRuntime
+
+
+def _default_adapter_factory(target: str):
+    """Select a runtime adapter by target name for CLI invocations."""
+    if target == "openclaw":
+        return OpenClawRuntime()
+    return MockRuntime()
 
 
 def find_project_root() -> Path:
@@ -38,7 +47,7 @@ def cmd_boot(args: argparse.Namespace) -> int:
     print(f"Registry: {registry_path.name}")
     print()
 
-    chassis = Chassis(registry_path=registry_path)
+    chassis = Chassis(registry_path=registry_path, adapter_factory=_default_adapter_factory)
     report = chassis.boot(spec_path)
     print(report.print_report())
 

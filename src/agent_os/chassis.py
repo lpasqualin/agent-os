@@ -159,9 +159,21 @@ class Chassis:
     def __init__(
         self,
         registry_path: str | Path,
+        adapter_factory: Any | None = None,
     ):
+        """
+        Args:
+            registry_path:   Path to capabilities/registry.yaml.
+            adapter_factory: Optional callable ``(target: str) -> RuntimeAdapter``.
+                             When provided, the chassis delegates runtime adapter
+                             construction to this factory instead of defaulting to
+                             MockRuntime. Phase 1 tests omit this (MockRuntime
+                             everywhere); Phase 2A+ pass a factory that wires real
+                             adapters for specific targets (e.g. "openclaw").
+        """
         self.registry_path = Path(registry_path)
         self.registry: CapabilityRegistry | None = None
+        self._adapter_factory = adapter_factory
 
         # Adapters (set during boot)
         self.runtime: RuntimeAdapter | None = None
@@ -219,7 +231,10 @@ class Chassis:
 
         # ── Step 5: Instantiate adapters ──
         try:
-            self.runtime = MockRuntime()
+            if self._adapter_factory is not None:
+                self.runtime = self._adapter_factory(spec.runtime.target)
+            else:
+                self.runtime = MockRuntime()
             self.memory = MockMemory()
             self.observability = MockObservability()
             self.governance = MockGovernance(self.registry, self.spec)
