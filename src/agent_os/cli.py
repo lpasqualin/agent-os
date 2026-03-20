@@ -710,6 +710,26 @@ def main():
                                dest="last_failure",
                                help="Replay the most recent failed run")
 
+    # validate-registry command
+    vr_parser = subparsers.add_parser(
+        "validate-registry", help="Validate a capability registry YAML"
+    )
+    vr_parser.add_argument("registry_path", help="Path to capability registry YAML")
+
+    # validate-agent command
+    va_parser = subparsers.add_parser(
+        "validate-agent", help="Validate an agent spec against the capability registry"
+    )
+    va_parser.add_argument("agent_path", help="Path to agent spec YAML")
+    va_parser.add_argument("--registry", help="Path to capability registry YAML")
+
+    # show-agent-capabilities command
+    sac_parser = subparsers.add_parser(
+        "show-agent-capabilities", help="Print capability table for an agent spec"
+    )
+    sac_parser.add_argument("agent_path", help="Path to agent spec YAML")
+    sac_parser.add_argument("--registry", help="Path to capability registry YAML")
+
     args = parser.parse_args()
 
     if args.command == "run":
@@ -728,6 +748,15 @@ def main():
         sys.exit(cmd_inspect(args))
     elif args.command == "replay":
         sys.exit(cmd_replay(args))
+    elif args.command == "validate-registry":
+        from agent_os.capabilities.commands import cmd_validate_registry
+        sys.exit(cmd_validate_registry(args))
+    elif args.command == "validate-agent":
+        from agent_os.capabilities.commands import cmd_validate_agent
+        sys.exit(cmd_validate_agent(args))
+    elif args.command == "show-agent-capabilities":
+        from agent_os.capabilities.commands import cmd_show_agent_capabilities
+        sys.exit(cmd_show_agent_capabilities(args))
     else:
         parser.print_help()
         sys.exit(1)

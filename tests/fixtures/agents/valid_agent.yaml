@@ -1,0 +1,19 @@
+# Test fixture: valid agent spec
+# All capability references exist in valid_registry.yaml.
+# policies are equal to or stricter than registry defaults.
+# No governance violations.
+
+id: test-agent
+name: Test Agent
+version: 1.0.0
+
+runtime:
+  target: mock
+
+capabilities:
+  - id: web.search
+  - id: tasks.read
+  - id: tasks.write
+    policy: confirm
+  - id: data.delete
+    policy: confirm

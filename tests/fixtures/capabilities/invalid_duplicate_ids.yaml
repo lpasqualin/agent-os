@@ -1,0 +1,24 @@
+# Test fixture: registry with duplicate capability ids
+# Expected error: "duplicate capability id: tasks.write"
+
+capabilities:
+  - id: tasks.read
+    action_class: pure_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: none
+    justification_required: false
+
+  - id: tasks.write
+    action_class: external_mutation
+    idempotent: false
+    compensable: true
+    data_sensitivity: none
+    justification_required: false
+
+  - id: tasks.write
+    action_class: internal_mutation
+    idempotent: false
+    compensable: true
+    data_sensitivity: none
+    justification_required: false

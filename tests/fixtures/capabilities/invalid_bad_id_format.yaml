@@ -1,0 +1,18 @@
+# Test fixture: registry with badly-formatted capability ids
+# Expected errors: "invalid capability id format: Gmail.Send"
+#                  "invalid capability id format: webSearch"
+
+capabilities:
+  - id: Gmail.Send
+    action_class: irreversible_mutation
+    idempotent: false
+    compensable: false
+    data_sensitivity: personal
+    justification_required: true
+
+  - id: webSearch
+    action_class: billable_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: none
+    justification_required: false

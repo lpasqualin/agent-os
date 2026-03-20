@@ -1,0 +1,38 @@
+# Test fixture: valid capability registry
+# Used by: test_capability_loader, test_capability_validator, test_capability_cli
+
+capabilities:
+  - id: web.search
+    action_class: billable_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: none
+    justification_required: false
+
+  - id: tasks.read
+    action_class: pure_read
+    idempotent: true
+    compensable: na
+    data_sensitivity: none
+    justification_required: false
+
+  - id: tasks.write
+    action_class: external_mutation
+    idempotent: false
+    compensable: true
+    data_sensitivity: none
+    justification_required: false
+
+  - id: email.send
+    action_class: irreversible_mutation
+    idempotent: false
+    compensable: false
+    data_sensitivity: personal
+    justification_required: true
+
+  - id: data.delete
+    action_class: irreversible_mutation
+    idempotent: true
+    compensable: false
+    data_sensitivity: internal
+    justification_required: false

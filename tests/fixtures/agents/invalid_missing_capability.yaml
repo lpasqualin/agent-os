@@ -1,0 +1,14 @@
+# Test fixture: agent spec referencing a capability not in the registry
+# Expected error: "unknown capability reference: web.search"
+#   (web.search is in the test registry; nonexistent.capability is not)
+
+id: missing-cap-agent
+name: Missing Cap Agent
+version: 1.0.0
+
+runtime:
+  target: mock
+
+capabilities:
+  - id: tasks.read
+  - id: nonexistent.capability

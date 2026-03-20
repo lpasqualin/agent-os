@@ -1,0 +1,19 @@
+# Test fixture: agent spec with a policy override that is LESS strict than
+# the registry default.
+#
+# data.delete has action_class: irreversible_mutation -> default policy: confirm
+# Setting policy: allow is LOOSER than confirm -> validation error.
+#
+# Expected error: "policy override for data.delete is less strict than registry"
+
+id: loose-policy-agent
+name: Loose Policy Agent
+version: 1.0.0
+
+runtime:
+  target: mock
+
+capabilities:
+  - id: tasks.read
+  - id: data.delete
+    policy: allow
