@@ -557,6 +557,70 @@ def cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+_FAILURE_REASON_MAP: dict[str, str] = {
+    "TIMEOUT":          "Runtime execution timed out",
+    "FAILED":           "Runtime returned a failure result",
+    "CAPABILITY_ERROR": "Capability not supported by runtime adapter",
+}
+
+_SUMMARY_WIDTH = 48
+
+
+def _format_duration(started_at: str | None, finished_at: str | None) -> str:
+    """Format elapsed time between two ISO timestamp strings."""
+    if not started_at or not finished_at:
+        return "unknown"
+    try:
+        from datetime import datetime as _dt
+        def _parse(s: str) -> _dt:
+            return _dt.fromisoformat(str(s).replace("Z", "+00:00"))
+        delta = (_parse(finished_at) - _parse(started_at)).total_seconds()
+        if delta < 0:
+            delta = 0.0
+        if delta < 60:
+            return f"{delta:.1f}s"
+        minutes = int(delta // 60)
+        seconds = delta % 60
+        return f"{minutes}m {seconds:.1f}s"
+    except Exception:
+        return "unknown"
+
+
+def _print_failure_summary(data: dict) -> None:
+    """Write a human-readable failure summary block to stderr before JSON stdout.
+
+    Written to stderr so that stdout remains pure JSON (machine-parseable).
+    Skipped entirely for SUCCESS runs. All missing fields are skipped
+    gracefully — no KeyError or crash.
+    """
+    raw_status = data.get("status", "")
+    norm = _normalize_status(raw_status)
+    if norm not in _FAILURE_STATUSES:
+        return
+
+    reason = _FAILURE_REASON_MAP.get(norm, "Unknown failure")
+    header = "── Failure Summary "
+
+    def _out(line: str = "") -> None:
+        print(line, file=sys.stderr)
+
+    def _row(label: str, value: object) -> None:
+        if value is not None and str(value).strip():
+            _out(f"  {label:<13}{value}")
+
+    _out(header + "─" * (_SUMMARY_WIDTH - len(header)))
+    _row("Status:", norm)
+    _row("Capability:", data.get("capability"))
+    _row("Runtime:", data.get("runtime_target"))
+    _row("Agent:", data.get("agent_id"))
+    _out(f"  {'Duration:':<13}{_format_duration(data.get('started_at'), data.get('finished_at'))}")
+    _out(f"  {'Reason:':<13}{reason}")
+    _row("Error:", data.get("error_message"))
+    _row("Policy:", data.get("policy_decision"))
+    _out("─" * _SUMMARY_WIDTH)
+    _out()
+
+
 def cmd_inspect(args: argparse.Namespace) -> int:
     """Print the full journal record for a specific run_id as pretty-printed JSON.
 
@@ -592,6 +656,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
     try:
         data = json.loads(record_path.read_text())
+        _print_failure_summary(data)
         print(json.dumps(data, indent=2))
         return 0
     except Exception:
