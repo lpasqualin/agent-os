@@ -182,17 +182,69 @@ def cmd_journal_latest(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_runs(args: argparse.Namespace) -> int:
-    """List recent execution runs."""
-    project_root = find_project_root()
-    journal = ExecutionJournal(project_root / ".agent_os" / "journal")
-    limit = getattr(args, "limit", 10)
-    rows = journal.list_runs(limit=limit)
+# ── Status normalization ──────────────────────────────────────
+#
+# Audit of journal status values found at Phase 4A (2026-03-20):
+#   'succeeded' → SUCCESS         (84 records)
+#   'failed'    → FAILED          (63 records)
+#   'rejected'  → CAPABILITY_ERROR (30 records — capability rejected by adapter or policy)
+#   'timed_out' → TIMEOUT         (19 records)
+#   'canceled'  → FAILED          (0 observed; possible from chassis approval-gate path)
+#
+# Normalization is applied at read time only — journal files are never mutated.
+# Canonical display values: SUCCESS | FAILED | CAPABILITY_ERROR | TIMEOUT
 
-    if not rows:
-        print("No runs found.")
-        return 0
+_STATUS_MAP: dict[str, str] = {
+    "succeeded":       "SUCCESS",
+    "success":         "SUCCESS",
+    "failed":          "FAILED",
+    "failure":         "FAILED",
+    "canceled":        "FAILED",
+    "cancelled":       "FAILED",
+    "rejected":        "CAPABILITY_ERROR",
+    "capability_error":"CAPABILITY_ERROR",
+    "timed_out":       "TIMEOUT",
+    "timeout":         "TIMEOUT",
+    "timed-out":       "TIMEOUT",
+}
 
+
+def _normalize_status(raw: str) -> str:
+    """Map a raw journal status string to a canonical display value.
+
+    Canonical values: SUCCESS, FAILED, CAPABILITY_ERROR, TIMEOUT.
+    Unrecognized values default to FAILED (safe fallback).
+    Input is matched case-insensitively.
+    """
+    return _STATUS_MAP.get(str(raw).lower(), "FAILED")
+
+
+def _filter_rows(
+    rows: list[dict],
+    status_filter: str | None,
+    capability_filter: str | None,
+) -> list[dict]:
+    """Apply additive (AND) filters to a list of run rows.
+
+    status_filter and capability_filter are both case-insensitive.
+    status_filter is compared against the normalized canonical value.
+    """
+    result = rows
+    if status_filter:
+        target = _normalize_status(status_filter)
+        result = [r for r in result if _normalize_status(r.get("status", "")) == target]
+    if capability_filter:
+        cap_lower = capability_filter.lower()
+        result = [r for r in result if (r.get("capability") or "").lower() == cap_lower]
+    return result
+
+
+def _print_runs_table(rows: list[dict]) -> None:
+    """Print a formatted runs table.
+
+    Status values are shown as-stored in the journal (raw).
+    Normalization is applied only for filter comparisons and --summary counts.
+    """
     header = f"{'RUN_ID':<20}  {'CAPABILITY':<16}  {'STATUS':<14}  STARTED_AT"
     print()
     print(header)
@@ -201,11 +253,95 @@ def cmd_runs(args: argparse.Namespace) -> int:
         started = str(r.get("requested_at", ""))[:19].replace("T", " ")
         print(
             f"{str(r['run_id']):<20}  "
-            f"{str(r['capability'] or ''):<16}  "
-            f"{str(r['status']):<14}  "
+            f"{str(r.get('capability') or ''):<16}  "
+            f"{str(r.get('status', '')):<14}  "
             f"{started}"
         )
     print()
+
+
+def _cmd_runs_summary(journal: ExecutionJournal) -> int:
+    """Print aggregate counts and bookmarks across all runs."""
+    all_rows = journal.list_runs(limit=10000)
+
+    if not all_rows:
+        print("No runs found.")
+        return 0
+
+    counts: dict[str, int] = {
+        "SUCCESS": 0,
+        "FAILED": 0,
+        "CAPABILITY_ERROR": 0,
+        "TIMEOUT": 0,
+    }
+    for r in all_rows:
+        key = _normalize_status(r.get("status", ""))
+        counts[key] = counts.get(key, 0) + 1
+
+    total = sum(counts.values())
+
+    print(f"Total runs:        {total}")
+    print(f"SUCCESS:           {counts['SUCCESS']}")
+    print(f"FAILED:            {counts['FAILED']}")
+    print(f"CAPABILITY_ERROR:  {counts['CAPABILITY_ERROR']}")
+    print(f"TIMEOUT:           {counts['TIMEOUT']}")
+    print()
+
+    # Most recent run (all_rows already newest-first)
+    latest = all_rows[0]
+    latest_started = str(latest.get("requested_at", ""))[:19].replace("T", " ")
+    print(
+        f"Most recent run:   "
+        f"{str(latest['run_id']):<20}  "
+        f"{str(latest.get('capability') or ''):<16}  "
+        f"{_normalize_status(latest.get('status', '')):<16}  "
+        f"{latest_started}"
+    )
+
+    # Last failure (FAILED, CAPABILITY_ERROR, or TIMEOUT)
+    _FAILURE_STATUSES = {"FAILED", "CAPABILITY_ERROR", "TIMEOUT"}
+    last_failure = next(
+        (r for r in all_rows if _normalize_status(r.get("status", "")) in _FAILURE_STATUSES),
+        None,
+    )
+    if last_failure:
+        fail_started = str(last_failure.get("requested_at", ""))[:19].replace("T", " ")
+        print(
+            f"Last failure:      "
+            f"{str(last_failure['run_id']):<20}  "
+            f"{str(last_failure.get('capability') or ''):<16}  "
+            f"{_normalize_status(last_failure.get('status', '')):<16}  "
+            f"{fail_started}"
+        )
+
+    return 0
+
+
+def cmd_runs(args: argparse.Namespace) -> int:
+    """List recent execution runs, with optional status/capability filters."""
+    project_root = find_project_root()
+    journal = ExecutionJournal(project_root / ".agent_os" / "journal")
+    limit = getattr(args, "limit", 10)
+    status_filter = getattr(args, "status", None)
+    capability_filter = getattr(args, "capability", None)
+    show_summary = getattr(args, "summary", False)
+
+    if show_summary:
+        return _cmd_runs_summary(journal)
+
+    # When filters are active, scan all rows then filter; otherwise use limit directly
+    if status_filter or capability_filter:
+        all_rows = journal.list_runs(limit=10000)
+        rows = _filter_rows(all_rows, status_filter, capability_filter)
+        rows = rows[:limit]
+    else:
+        rows = journal.list_runs(limit=limit)
+
+    if not rows:
+        print("No runs found.")
+        return 0
+
+    _print_runs_table(rows)
     return 0
 
 
@@ -415,6 +551,9 @@ def main():
     # runs command
     runs_parser = subparsers.add_parser("runs", help="List recent execution runs")
     runs_parser.add_argument("--limit", type=int, default=10, help="Max runs to show (default 10)")
+    runs_parser.add_argument("--status", help="Filter by status (success|failed|capability_error|timeout)")
+    runs_parser.add_argument("--capability", help="Filter by capability (e.g. web.search)")
+    runs_parser.add_argument("--summary", action="store_true", default=False, help="Show aggregate summary")
 
     # inspect command
     inspect_parser = subparsers.add_parser("inspect", help="Show full journal record for a run_id")
