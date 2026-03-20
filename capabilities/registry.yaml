@@ -11,6 +11,16 @@
 # Every capability MUST declare all five semantic guarantees.
 # Governance defaults derive from action_class (see contracts/action-taxonomy.md).
 # Agent specs may override policy STRICTER, never more permissive.
+#
+# Registry decisions (Ax review, v0.4.0):
+#   - calendar.list kept as distinct from calendar.read (list = agenda overview,
+#     read = specific event detail — separate permission boundaries)
+#   - memory.forget does NOT require justification (routine cleanup, not privileged)
+#   - social.engage is NOT compensable (likes/replies not reliably reversible)
+#   - browser.navigate classified as billable_read by intended semantics; if an
+#     adapter's navigation causes server-side mutation, that's an adapter/governance
+#     problem, not a registry reclassification
+#   - compensable: na is the canonical value for non-applicable (not null, not n/a)
 
 capabilities:
 
@@ -144,7 +154,7 @@ capabilities:
     idempotent: false
     compensable: false
     data_sensitivity: internal
-    justification_required: false
+    justification_required: false       # routine cleanup should not require justification
 
   # ── FINANCE ────────────────────────────
   - id: finance.read
@@ -186,6 +196,6 @@ capabilities:
   - id: social.engage
     action_class: external_mutation
     idempotent: false
-    compensable: false
+    compensable: false                  # likes/replies/follows not reliably reversible
     data_sensitivity: none
     justification_required: false

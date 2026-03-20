@@ -1,10 +1,228 @@
-# Agent OS — Agent Spec Schema
-# See constitution/v0.4.0.md §4.2 for field definitions
-# This schema validates SHAPE. The capability registry validates MEANING.
+# Agent OS — Agent Spec Schema v0.1.0
+# 
+# This schema validates SHAPE only.
+# It answers: "Is this a structurally valid agent spec?"
+#
+# It does NOT validate:
+#   - Whether capability IDs exist in the registry (semantic validation)
+#   - Whether policy overrides are too permissive (governance validation)
+#   - Whether action classes match capabilities (registry cross-check)
+#   - Whether env_refs resolve to real values (deploy-time resolution)
+#
+# Those belong to the semantic validation layer, not the schema.
+#
+# See constitution/v0.4.0.md §4.2 for field definitions.
+# See capabilities/registry.yaml for semantic source of truth.
 
-# TODO: Phase 1 — define as JSON Schema or YAML schema
-# Must validate: field presence, types, enum values, env_ref format
-
+$schema: "http://json-schema.org/draft-07/schema#"
+title: "Agent OS Agent Spec"
+description: "Declarative agent definition, portable across runtimes."
 type: object
-required: [id, name, version, capabilities, runtime]
-properties: {}
+
+required:
+  - id
+  - name
+  - version
+  - capabilities
+  - runtime
+
+properties:
+
+  # ── Identity ──────────────────────────────
+  id:
+    type: string
+    pattern: "^[a-z][a-z0-9_-]*$"
+    description: "Unique agent identifier. Lowercase, alphanumeric, hyphens, underscores."
+
+  name:
+    type: string
+    minLength: 1
+    description: "Human-readable display name."
+
+  version:
+    type: string
+    pattern: "^\\d+\\.\\d+\\.\\d+$"
+    description: "Semantic version of this agent spec."
+
+  identity:
+    type: object
+    properties:
+      soul:
+        type: string
+        description: "Path to agent persona/values file, or inline content."
+      user_context:
+        type: string
+        description: "Path to operator context file, or inline content."
+
+  # ── Channels ──────────────────────────────
+  channels:
+    type: array
+    items:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum:
+            - telegram
+            - slack
+            - discord
+            - whatsapp
+            - matrix
+            - email
+            - webhook
+            - cli
+          description: "Channel adapter type."
+        config:
+          type: string
+          description: "Environment reference (env_ref). Must not contain secrets."
+
+  # ── Models ────────────────────────────────
+  models:
+    type: object
+    properties:
+      primary:
+        type: string
+        description: "Primary model identifier (provider/model format)."
+      fallback:
+        type: array
+        items:
+          type: string
+        description: "Ordered fallback chain."
+      local:
+        type: array
+        items:
+          type: string
+        description: "Local model identifiers (e.g., ollama/model:tag)."
+
+  # ── Capabilities ──────────────────────────
+  capabilities:
+    type: array
+    minItems: 1
+    description: "Capability declarations using domain.verb naming."
+    items:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z]+\\.[a-z]+$"
+          description: "Capability ID in domain.verb format."
+        policy:
+          type: string
+          enum:
+            - allow
+            - confirm
+            - deny
+          description: "Governance policy override. Stricter only (semantic validation)."
+        required:
+          type: boolean
+          default: false
+          description: "If true, deployment fails when unmapped."
+
+  # ── Memory ────────────────────────────────
+  memory:
+    type: object
+    properties:
+      backend:
+        type: string
+        description: "Memory adapter ID. 'default' for env-resolved."
+      scope:
+        type: string
+        enum:
+          - agent
+          - shared
+          - global
+        default: agent
+        description: "Memory isolation level."
+      config:
+        type: string
+        description: "Environment reference for backend config."
+
+  # ── Observability ─────────────────────────
+  observability:
+    type: object
+    properties:
+      backend:
+        type: string
+        description: "Observability adapter ID. 'default' for env-resolved."
+      config:
+        type: string
+        description: "Environment reference for backend config."
+
+  # ── Governance ────────────────────────────
+  governance:
+    type: object
+    properties:
+      spend_limit:
+        type: object
+        description: "Token/cost limits per period."
+        properties:
+          daily_usd:
+            type: number
+            minimum: 0
+          monthly_usd:
+            type: number
+            minimum: 0
+      approval_gates:
+        type: array
+        items:
+          type: string
+          pattern: "^[a-z]+\\.[a-z]+$"
+        description: "Capability IDs requiring human approval."
+      role:
+        type: string
+        description: "Agent privilege level."
+
+  # ── Schedule ──────────────────────────────
+  schedule:
+    type: array
+    items:
+      type: object
+      required:
+        - cron
+        - task
+      properties:
+        cron:
+          type: string
+          description: "Cron expression (5-field)."
+        task:
+          type: string
+          description: "Task identifier or prompt."
+
+  # ── Runtime ───────────────────────────────
+  runtime:
+    type: object
+    required:
+      - target
+    properties:
+      target:
+        type: string
+        description: "Runtime adapter ID (openclaw, openfang, mock)."
+      config:
+        type: string
+        description: "Environment reference for runtime config."
+
+# ── Semantic Validations (outside this schema) ──────────────
+# 
+# 1. CAPABILITY REGISTRY CHECK
+#    capabilities[].id must exist in registry.yaml
+#
+# 2. POLICY PERMISSIVENESS CHECK  
+#    policy may only be stricter than action_class default
+#    strictness order: allow < confirm < deny
+#
+# 3. APPROVAL GATE CONSISTENCY
+#    approval_gates entries must match capabilities with policy: confirm
+#
+# 4. REQUIRED CAPABILITY MAPPING
+#    required: true capabilities must have runtime adapter mapping
+#
+# 5. NO EMBEDDED SECRETS
+#    env_ref fields must not contain literal secrets
+#
+# 6. SCOPE AUTHORITY
+#    shared scope requires shared_write privilege in role
+#    global scope requires global_write privilege in role

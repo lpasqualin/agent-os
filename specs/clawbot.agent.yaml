@@ -36,10 +36,12 @@ capabilities:
   - id: tasks.write
     policy: allow
     required: true
+    # Semantic: update an existing task (not create new)
 
   - id: tasks.create
     policy: allow
     required: true
+    # Semantic: create a new task
 
   - id: tasks.delete
     policy: confirm            # stricter than default (irreversible_mutation already defaults confirm)
@@ -57,10 +59,12 @@ capabilities:
   - id: calendar.read
     policy: allow
     required: false
+    # Semantic: inspect a specific event's details
 
   - id: calendar.list
     policy: allow
     required: false
+    # Semantic: enumerate/list events in a time range
 
   # ── Communication (gated) ──────────────
   - id: email.read
@@ -85,7 +89,7 @@ capabilities:
     required: true
 
   - id: memory.forget
-    policy: allow              # routine memory hygiene; not approval-gated
+    policy: allow              # routine memory hygiene — promote to confirm if abuse observed
     required: false
 
 memory:
