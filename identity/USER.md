@@ -2,7 +2,7 @@
 
 ## Operator
 
-Leo Pasqua — South Florida
+LP — independent operator
 
 ## Communication Style
 
@@ -13,11 +13,11 @@ Leo Pasqua — South Florida
 ## Work Context
 
 - Building Agent OS chassis for portable agent deployment
-- Active ventures: Siftwise, BBS (visible in Obsidian vault)
-- Collaborates with Ax on architecture decisions
+- Active ventures in SaaS and services
+- Collaborates on architecture decisions
 
 ## Infrastructure
 
-- HP ProDesk 600, Ubuntu 24.04, self-hosted
+- Self-hosted Linux box (x86), Ubuntu 24.04
 - Primary interface: Telegram
 - Local models via Ollama

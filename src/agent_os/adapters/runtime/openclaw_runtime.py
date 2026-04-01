@@ -2,7 +2,7 @@
 
 Connects Agent OS to a sandboxed OpenClaw instance via one-shot CLI invocation
 (``openclaw agent --local --json``). No gateway required; no always-on service.
-Runs as the invoking user (leo-paz) — no sudo.
+Runs as the invoking user — no sudo required.
 
 Phase 2B contract:
 - execute() returns RuntimeExecutionResult on success.
@@ -19,8 +19,7 @@ Supported capabilities (Phase 2A scope, unchanged):
 Anything outside this set raises UnsupportedCapabilityError.
 
 Binary access:
-    /home/clawbot/.npm-global/bin/openclaw is world-executable (777).
-    /home/clawbot is traversable (o+x). Leo-paz invokes it directly.
+    The openclaw binary must be world-executable and reachable via PATH or absolute path.
 
 For live invocations, TAVILY_WEB_SEARCH_KEY and TODOIST_API_KEY must be
 exported in the caller's environment.
@@ -118,7 +117,7 @@ class OpenClawRuntime(RuntimeAdapter):
                     f"invoke_fn raised: {exc}"
                 ) from exc
 
-        # ── Real subprocess (runs as leo-paz, no sudo) ────────
+        # ── Real subprocess (no sudo required) ────────
         config_path = self._config_path()
         if not config_path.exists():
             raise RuntimeInvocationError(

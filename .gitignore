@@ -4,6 +4,9 @@ specs/*.env.yaml
 # Resolved deployments (ephemeral, never committed)
 .resolved/
 
+# Runtime data (journals, traces, governance logs — host-specific)
+.agent_os/
+
 # Node
 node_modules/
 package-lock.json
