@@ -47,7 +47,8 @@ Adapters bridge the two. The journal stores only normalized RunRecords — not r
 }
 ```
 
-Fields derived from real OpenClaw cron telemetry: `job_id`, `run_id`, `attempt`, `model_requested`, `model_used`, `duration_ms`, `status`, `failure_class`.
+Adapter-observed telemetry fields used to validate RunRecord normalization:
+job_id, runtime_run_id, attempt, model_requested, model_used, duration_ms, status, failure_class
 
 ---
 
