@@ -429,7 +429,7 @@ Static mapping files: `compliance/nist-ai-rmf.yaml`, `compliance/soc2.yaml`, `co
 9. Test everything — no phase sealed without tests, Ax reviews before sealing
 10. No expansion layer may outrun the core loop
 11. The journal is the authoritative audit record, not the raw execution source — runtime telemetry = execution truth, journal = audit truth, adapters bridge the two, discrepancies must be explainable not overridden
-
+12. No runtime-native field may become a required Agent OS core field unless it is semantically runtime-neutral.
 ---
 
 > *You are not building a better agent.*

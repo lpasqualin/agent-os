@@ -11,7 +11,7 @@ Source of truth: Todoist → AI & Projects → Agent OS section.
 - Do NOT start D3, C, E, F, G, or H until Core Loop Gate passes
 - No phase sealed without tests
 - Ax reviews before sealing any phase
-
+- Runtime-native telemetry fields are adapter inputs, not Agent OS core fields unless they are semantically runtime-neutral
 ---
 
 ## Phase A — Journal & Audit
