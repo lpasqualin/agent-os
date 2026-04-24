@@ -34,21 +34,54 @@ Adapters bridge the two. The journal stores only normalized RunRecords — not r
   "agent_id": "...",
   "capability": "tasks.create",
   "action_class": "external_mutation",
-  "policy_decision": "allow",
-  "runtime_target": "openclaw",
-  "runtime_ref": "native_run_id",
-  "status": "succeeded",
-  "failure_reason": null,
-  "started_at": "...",
-  "ended_at": "...",
+
+  "policy": {
+    "decision": "allow",
+    "reason": "..."
+  },
+
+  "runtime": {
+    "target": "openclaw",
+    "ref": "native_run_id_or_session_id",
+    "telemetry_ref": "pointer_to_runtime_telemetry"
+  },
+
+  "execution": {
+    "status": "succeeded",
+    "failure_reason": null,
+    "started_at": "...",
+    "ended_at": "...",
+    "duration_ms": 22409,
+    "attempt": 1
+  },
+
+  "model": {
+    "requested": null,
+    "used": "openai-codex/gpt-5.4-mini"
+  },
+
+  "usage": {
+    "input_tokens": 24536,
+    "output_tokens": 1021,
+    "total_tokens": 26253,
+    "estimated_cost_usd": null
+  },
+
   "result_summary": "...",
-  "sequence_number": 42,
-  "prev_hash": "..."
+
+  "lineage": {
+    "sequence_number": 42,
+    "prev_hash": "...",
+    "record_hash": "..."
+  }
 }
+
 ```
 
 Adapter-observed telemetry fields used to validate RunRecord normalization:
-job_id, runtime_run_id, attempt, model_requested, model_used, duration_ms, status, failure_class
+job_id, runtime_run_id, attempt, model_requested, model_used, duration_ms, status, failure_class, input_tokens, output_tokens, total_tokens, estimated_cost_usd, telemetry_ref
+
+These are validation inputs, not all required runtime-native fields. Only semantically runtime-neutral values become normalized RunRecord fields.
 
 ---
 
@@ -58,6 +91,7 @@ job_id, runtime_run_id, attempt, model_requested, model_used, duration_ms, statu
 
 **Does NOT store:** token streams, step-by-step tool calls, raw logs, model reasoning traces.
 
+Journal stores compact normalized audit facts. Runtime telemetry remains execution truth. Observability and metrics may join journal records with runtime telemetry for richer debugging and analytics.
 ---
 
 ## Core Loop Proof Gate
