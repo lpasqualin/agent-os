@@ -182,6 +182,48 @@ def cmd_journal_latest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_journal_stats(args: argparse.Namespace) -> int:
+    """Print aggregate statistics over the entire journal."""
+    project_root = find_project_root()
+    journal = ExecutionJournal(project_root / ".agent_os" / "journal")
+    stats = journal.stats()
+    
+    print(json.dumps(stats, indent=2))
+    return 0
+
+
+def cmd_journal_export(args: argparse.Namespace) -> int:
+    """Export journal records as JSON or CSV."""
+    from datetime import date
+    project_root = find_project_root()
+    journal = ExecutionJournal(project_root / ".agent_os" / "journal")
+    
+    since_date = None
+    until_date = None
+    
+    if args.since:
+        try:
+            since_date = date.fromisoformat(args.since)
+        except ValueError:
+            print(f"Invalid --since date format: {args.since}. Use YYYY-MM-DD.")
+            return 1
+            
+    if args.until:
+        try:
+            until_date = date.fromisoformat(args.until)
+        except ValueError:
+            print(f"Invalid --until date format: {args.until}. Use YYYY-MM-DD.")
+            return 1
+        
+    try:
+        output = journal.export(fmt=args.format, since=since_date, until=until_date)
+        print(output, end="")
+        return 0
+    except Exception as e:
+        print(f"Export failed: {e}")
+        return 1
+
+
 # ── Status normalization ──────────────────────────────────────
 #
 # Audit of journal status values found at Phase 4A (2026-03-20):
@@ -408,8 +450,8 @@ def _enrich_replay_record(
 ) -> None:
     """Inject replay linkage into the new journal entry. Non-fatal on error."""
     try:
-        path = journal_dir / f"{new_run_id}.json"
-        if not path.exists():
+        path = ExecutionJournal(journal_dir).find_record_path(new_run_id)
+        if not path or not path.exists():
             return
         data = json.loads(path.read_text())
         meta = data.get("metadata") or {}
@@ -439,8 +481,8 @@ def _replay_run(
         adapter_factory = _default_adapter_factory
 
     # ── 1. Load original record ──────────────────────────────
-    record_path = journal_dir / f"{run_id}.json"
-    if not record_path.exists():
+    record_path = ExecutionJournal(journal_dir).find_record_path(run_id)
+    if not record_path or not record_path.exists():
         return {"error": f"Run {run_id} not found."}, 1
 
     try:
@@ -648,9 +690,9 @@ def cmd_inspect(args: argparse.Namespace) -> int:
             return 1
 
     # ── Existing inspect path (unchanged) ────────────────────
-    record_path = journal_dir / f"{run_id}.json"
+    record_path = ExecutionJournal(journal_dir).find_record_path(run_id)
 
-    if not record_path.exists():
+    if not record_path or not record_path.exists():
         print(f"Run {run_id} not found.")
         return 1
 
@@ -686,6 +728,12 @@ def main():
     journal_parser = subparsers.add_parser("journal", help="Inspect execution journal")
     journal_sub = journal_parser.add_subparsers(dest="journal_command")
     journal_sub.add_parser("latest", help="Show the most recent run journal entry")
+    journal_sub.add_parser("stats", help="Show aggregate statistics over the entire journal")
+    
+    export_parser = journal_sub.add_parser("export", help="Export journal records")
+    export_parser.add_argument("--format", choices=["json", "csv"], default="json", help="Export format (json|csv)")
+    export_parser.add_argument("--since", help="Include records >= this date (YYYY-MM-DD)")
+    export_parser.add_argument("--until", help="Include records <= this date (YYYY-MM-DD)")
 
     # runs command
     runs_parser = subparsers.add_parser("runs", help="List recent execution runs")
@@ -739,6 +787,10 @@ def main():
     elif args.command == "journal":
         if getattr(args, "journal_command", None) == "latest":
             sys.exit(cmd_journal_latest(args))
+        elif getattr(args, "journal_command", None) == "stats":
+            sys.exit(cmd_journal_stats(args))
+        elif getattr(args, "journal_command", None) == "export":
+            sys.exit(cmd_journal_export(args))
         else:
             journal_parser.print_help()
             sys.exit(1)
